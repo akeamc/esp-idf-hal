@@ -11,7 +11,6 @@
 //!
 //! Not supported:
 //! * Interrupts.
-//! * Receiving.
 //! * Change of config after initialisation.
 //!
 //! # Example
@@ -51,10 +50,7 @@
 //! [VariableLengthSignal] allows you to use the heap and incrementally add pulse items without knowing the size
 //! ahead of time.
 
-use core::cell::UnsafeCell;
-use core::convert::{TryFrom, TryInto};
-use core::marker::PhantomData;
-use core::ptr;
+use core::slice;
 use core::time::Duration;
 
 #[cfg(feature = "alloc")]
@@ -62,15 +58,15 @@ extern crate alloc;
 
 use esp_idf_sys::*;
 
-use crate::gpio::InputPin;
-use crate::gpio::OutputPin;
-use crate::peripheral::Peripheral;
 use crate::units::Hertz;
 
-use config::ReceiveConfig;
-use config::TransmitConfig;
-
 pub use chip::*;
+#[cfg(any(feature = "rmt-legacy", esp_idf_version_major = "4"))]
+pub use driver::*;
+
+// Might not always be available in the generated `esp-idf-sys` bindings
+const ERR_ERANGE: esp_err_t = 34;
+const ERR_EOVERFLOW: esp_err_t = 139;
 
 pub type RmtTransmitConfig = config::TransmitConfig;
 pub type RmtReceiveConfig = config::ReceiveConfig;
@@ -174,7 +170,7 @@ impl PulseTicks {
     /// returned.
     pub fn new(ticks: u16) -> Result<Self, EspError> {
         if ticks > Self::MAX {
-            Err(EspError::from(ESP_ERR_INVALID_ARG).unwrap())
+            Err(EspError::from_infallible::<ESP_ERR_INVALID_ARG>())
         } else {
             Ok(Self(ticks))
         }
@@ -207,22 +203,22 @@ pub fn duration_to_ticks(ticks_hz: Hertz, duration: &Duration) -> Result<u16, Es
     let ticks = duration
         .as_nanos()
         .checked_mul(u32::from(ticks_hz) as u128)
-        .ok_or_else(|| EspError::from(EOVERFLOW as i32).unwrap())?
+        .ok_or_else(|| EspError::from(ERR_EOVERFLOW).unwrap())?
         / 1_000_000_000;
 
-    u16::try_from(ticks).map_err(|_| EspError::from(EOVERFLOW as i32).unwrap())
+    u16::try_from(ticks).map_err(|_| EspError::from(ERR_EOVERFLOW).unwrap())
 }
 
 /// A utility to convert ticks into duration, depending on the clock ticks.
 pub fn ticks_to_duration(ticks_hz: Hertz, ticks: u16) -> Result<Duration, EspError> {
     let duration = 1_000_000_000_u128
         .checked_mul(ticks as u128)
-        .ok_or_else(|| EspError::from(EOVERFLOW as i32).unwrap())?
+        .ok_or_else(|| EspError::from(ERR_EOVERFLOW).unwrap())?
         / u32::from(ticks_hz) as u128;
 
     u64::try_from(duration)
         .map(Duration::from_nanos)
-        .map_err(|_| EspError::from(EOVERFLOW as i32).unwrap())
+        .map_err(|_| EspError::from(ERR_EOVERFLOW).unwrap())
 }
 
 pub type TxRmtConfig = config::TransmitConfig;
@@ -246,10 +242,14 @@ pub type RxRmtConfig = config::ReceiveConfig;
 ///
 /// ```
 pub mod config {
+    use enumset::EnumSet;
     use esp_idf_sys::{EspError, ESP_ERR_INVALID_ARG};
 
     use super::PinState;
-    use crate::units::{FromValueType, Hertz};
+    use crate::{
+        interrupt::InterruptType,
+        units::{FromValueType, Hertz},
+    };
 
     /// A percentage from 0 to 100%, used to specify the duty percentage in [`CarrierConfig`].
     #[derive(Debug, Copy, Clone, Eq, PartialEq)]
@@ -259,7 +259,7 @@ pub mod config {
         /// Must be between 0 and 100, otherwise an error is returned.
         pub fn new(v: u8) -> Result<Self, EspError> {
             if v > 100 {
-                Err(EspError::from(ESP_ERR_INVALID_ARG).unwrap())
+                Err(EspError::from_infallible::<ESP_ERR_INVALID_ARG>())
             } else {
                 Ok(Self(v))
             }
@@ -288,16 +288,19 @@ pub mod config {
             }
         }
 
+        #[must_use]
         pub fn frequency(mut self, hz: Hertz) -> Self {
             self.frequency = hz;
             self
         }
 
+        #[must_use]
         pub fn carrier_level(mut self, state: PinState) -> Self {
             self.carrier_level = state;
             self
         }
 
+        #[must_use]
         pub fn duty_percent(mut self, duty: DutyPercent) -> Self {
             self.duty_percent = duty;
             self
@@ -316,11 +319,16 @@ pub mod config {
     pub enum Loop {
         None,
         Endless,
-        #[cfg(not(any(esp32, esp32c2)))]
+        #[cfg(any(
+            all(not(esp_idf_version_major = "4"), not(esp_idf_version_major = "5")),
+            all(esp_idf_version_major = "5", not(esp_idf_version_minor = "0")),
+            not(esp32)
+        ))]
         Count(u32),
     }
 
     /// Used when creating a [`Transmit`][crate::rmt::Transmit] instance.
+    #[derive(Debug, Clone)]
     pub struct TransmitConfig {
         pub clock_divider: u8,
         pub mem_block_num: u8,
@@ -336,6 +344,8 @@ pub mod config {
         /// When set, RMT channel will take REF_TICK or XTAL as source clock. The benefit is, RMT
         /// channel can continue work even when APB clock is changing.
         pub aware_dfs: bool,
+
+        pub intr_flags: EnumSet<InterruptType>,
     }
 
     impl TransmitConfig {
@@ -347,36 +357,49 @@ pub mod config {
                 looping: Loop::None,
                 carrier: None,
                 idle: Some(PinState::Low),
+                intr_flags: EnumSet::<InterruptType>::empty(),
             }
         }
 
+        #[must_use]
         pub fn aware_dfs(mut self, enable: bool) -> Self {
             self.aware_dfs = enable;
             self
         }
 
+        #[must_use]
         pub fn mem_block_num(mut self, mem_block_num: u8) -> Self {
             self.mem_block_num = mem_block_num;
             self
         }
 
+        #[must_use]
         pub fn clock_divider(mut self, divider: u8) -> Self {
             self.clock_divider = divider;
             self
         }
 
+        #[must_use]
         pub fn looping(mut self, looping: Loop) -> Self {
             self.looping = looping;
             self
         }
 
+        #[must_use]
         pub fn carrier(mut self, carrier: Option<CarrierConfig>) -> Self {
             self.carrier = carrier;
             self
         }
 
+        #[must_use]
         pub fn idle(mut self, idle: Option<PinState>) -> Self {
             self.idle = idle;
+            self
+        }
+
+        #[must_use]
+        pub fn intr_flags(mut self, flags: EnumSet<InterruptType>) -> Self {
+            self.intr_flags = flags;
             self
         }
     }
@@ -389,6 +412,7 @@ pub mod config {
     }
 
     /// Used when creating a [`Receive`][crate::rmt::Receive] instance.
+    #[derive(Debug, Clone)]
     pub struct ReceiveConfig {
         pub clock_divider: u8,
         pub mem_block_num: u8,
@@ -396,6 +420,7 @@ pub mod config {
         pub filter_ticks_thresh: u8,
         pub filter_en: bool,
         pub carrier: Option<CarrierConfig>,
+        pub intr_flags: EnumSet<InterruptType>,
     }
 
     impl ReceiveConfig {
@@ -403,33 +428,45 @@ pub mod config {
             Self::default()
         }
 
+        #[must_use]
         pub fn clock_divider(mut self, divider: u8) -> Self {
             self.clock_divider = divider;
             self
         }
 
+        #[must_use]
         pub fn mem_block_num(mut self, mem_block_num: u8) -> Self {
             self.mem_block_num = mem_block_num;
             self
         }
 
+        #[must_use]
         pub fn idle_threshold(mut self, threshold: u16) -> Self {
             self.idle_threshold = threshold;
             self
         }
 
+        #[must_use]
         pub fn filter_ticks_thresh(mut self, threshold: u8) -> Self {
             self.filter_ticks_thresh = threshold;
             self
         }
 
+        #[must_use]
         pub fn filter_en(mut self, enable: bool) -> Self {
             self.filter_en = enable;
             self
         }
 
+        #[must_use]
         pub fn carrier(mut self, carrier: Option<CarrierConfig>) -> Self {
             self.carrier = carrier;
+            self
+        }
+
+        #[must_use]
+        pub fn intr_flags(mut self, flags: EnumSet<InterruptType>) -> Self {
+            self.intr_flags = flags;
             self
         }
     }
@@ -444,282 +481,58 @@ pub mod config {
                 filter_ticks_thresh: 100, // 100 microseconds, pulses less than this will be ignored
                 filter_en: true,
                 carrier: None,
+                intr_flags: EnumSet::<InterruptType>::empty(),
             }
         }
     }
 }
 
-/// The RMT transmitter driver.
+/// Symbols
 ///
-/// Use [`TxRmtDriver::start()`] or [`TxRmtDriver::start_blocking()`] to transmit pulses.
-///
-/// See the [rmt module][crate::rmt] for more information.
+/// Represents a single pulse cycle symbol comprised of mark (high)
+/// and space (low) periods in either order or a fixed level if both
+/// halves have the same [`PinState`]. This is just a newtype over the
+/// IDF's `rmt_item32_t` or `rmt_symbol_word_t` type.
+#[derive(Clone, Copy)]
+pub struct Symbol(rmt_item32_t);
 
-pub struct TxRmtDriver<'d> {
-    channel: u8,
-    _p: PhantomData<&'d mut ()>,
-}
-
-impl<'d> TxRmtDriver<'d> {
-    /// Initialise the rmt module with the specified pin, channel and configuration.
-    ///
-    /// To uninstall the driver just drop it.
-    ///
-    /// Internally this calls `rmt_config()` and `rmt_driver_install()`.
-    pub fn new<C: RmtChannel>(
-        _channel: impl Peripheral<P = C> + 'd,
-        pin: impl Peripheral<P = impl OutputPin> + 'd,
-        config: &TransmitConfig,
-    ) -> Result<Self, EspError> {
-        crate::into_ref!(pin);
-
-        let mut flags = 0;
-        if config.aware_dfs {
-            flags |= RMT_CHANNEL_FLAGS_AWARE_DFS;
-        }
-
-        let carrier_en = config.carrier.is_some();
-        let carrier = config.carrier.unwrap_or_default();
-
-        let sys_config = rmt_config_t {
-            rmt_mode: rmt_mode_t_RMT_MODE_TX,
-            channel: C::channel(),
-            gpio_num: pin.pin(),
-            clk_div: config.clock_divider,
-            mem_block_num: config.mem_block_num,
-            flags,
-            __bindgen_anon_1: rmt_config_t__bindgen_ty_1 {
-                tx_config: rmt_tx_config_t {
-                    carrier_en,
-                    carrier_freq_hz: carrier.frequency.into(),
-                    carrier_level: carrier.carrier_level as u32,
-                    carrier_duty_percent: carrier.duty_percent.0,
-                    idle_output_en: config.idle.is_some(),
-                    idle_level: config.idle.map(|i| i as u32).unwrap_or(0),
-                    loop_en: config.looping != config::Loop::None,
-                    #[cfg(not(any(esp32, esp32c2)))]
-                    loop_count: match config.looping {
-                        config::Loop::Count(count) if count > 0 && count < 1024 => count,
-                        _ => 0,
-                    },
-                },
-            },
+impl Symbol {
+    /// Create a symbol from a pair of half-cycles.
+    pub fn new(level0: Pulse, level1: Pulse) -> Self {
+        let item = rmt_item32_t {
+            __bindgen_anon_1: rmt_item32_t__bindgen_ty_1 { val: 0 },
         };
-
-        unsafe {
-            esp!(rmt_config(&sys_config))?;
-            esp!(rmt_driver_install(C::channel(), 0, 0))?;
-        }
-
-        Ok(Self {
-            channel: C::channel() as _,
-            _p: PhantomData,
-        })
+        let mut this = Self(item);
+        this.update(level0, level1);
+        this
     }
 
-    /// Get speed of the channel’s internal counter clock.
-    ///
-    /// This calls [rmt_get_counter_clock()][rmt_get_counter_clock]
-    /// internally. It is used for calculating the number of ticks per second for pulses.
-    ///
-    /// See [Pulse::new_with_duration()].
-    ///
-    /// [rmt_get_counter_clock]: https://docs.espressif.com/projects/esp-idf/en/latest/esp32/api-reference/peripherals/rmt.html#_CPPv421rmt_get_counter_clock13rmt_channel_tP8uint32_t
-    pub fn counter_clock(&self) -> Result<Hertz, EspError> {
-        let mut ticks_hz: u32 = 0;
-        esp!(unsafe { rmt_get_counter_clock(self.channel(), &mut ticks_hz) })?;
-        Ok(ticks_hz.into())
-    }
-
-    /// Start sending the given signal without blocking.
-    ///
-    /// `signal` is captured for safety so that the user can't change the data while transmitting.
-    pub fn start<S>(&mut self, signal: S) -> Result<(), EspError>
-    where
-        S: Signal,
-    {
-        self.write_items(&signal, false)
-    }
-
-    /// Start sending the given signal while blocking.
-    pub fn start_blocking<S>(&mut self, signal: &S) -> Result<(), EspError>
-    where
-        S: Signal,
-    {
-        self.write_items(signal, true)
-    }
-
-    fn write_items<S>(&mut self, signal: &S, block: bool) -> Result<(), EspError>
-    where
-        S: Signal,
-    {
-        let items = signal.as_slice();
-        esp!(unsafe { rmt_write_items(self.channel(), items.as_ptr(), items.len() as i32, block) })
-    }
-
-    /// Transmit all items in `iter` without blocking.
-    ///
-    /// Note that this requires `iter` to be [`Box`]ed for an allocation free version see [`Self::start_iter_blocking`].
-    ///
-    /// ### Warning
-    ///
-    /// Iteration of `iter` happens inside an interrupt handler so beware of side-effects
-    /// that don't work in interrupt handlers. Iteration must also be fast so that there
-    /// are no time-gaps between successive transmissions where the perhipheral has to
-    /// wait for items. This can cause weird behavior and can be counteracted with
-    /// increasing [`Config::mem_block_num`] or making iteration more efficient.
-    #[cfg(feature = "alloc")]
-    pub fn start_iter<T>(&mut self, iter: T) -> Result<(), EspError>
-    where
-        T: Iterator<Item = rmt_item32_t> + Send + 'static,
-    {
-        let iter = alloc::boxed::Box::new(UnsafeCell::new(iter));
-        unsafe {
-            esp!(rmt_translator_init(
-                self.channel(),
-                Some(Self::translate_iterator::<T, true>),
-            ))?;
-
-            esp!(rmt_write_sample(
-                self.channel(),
-                alloc::boxed::Box::leak(iter) as *const _ as _,
-                1,
-                false
-            ))
-        }
-    }
-
-    /// Transmit all items in `iter`, blocking until all items are transmitted.
-    ///
-    /// This method does not require any allocations since the thread is paused until all
-    /// items are transmitted. The iterator lives on the stack and will be dropped after
-    /// all items are written and before this method returns.
-    ///
-    /// ### Warning
-    ///
-    /// Iteration of `iter` happens inside an interrupt handler so beware of side-effects
-    /// that don't work in interrupt handlers. Iteration must also be fast so that there
-    /// are no time-gaps between successive transmissions where the perhipheral has to
-    /// wait for items. This can cause weird behavior and can be counteracted with
-    /// increasing [`Config::mem_block_num`] or making iteration more efficient.
-
-    pub fn start_iter_blocking<T>(&mut self, iter: T) -> Result<(), EspError>
-    where
-        T: Iterator<Item = rmt_item32_t> + Send,
-    {
-        let iter = UnsafeCell::new(iter);
-        unsafe {
-            // TODO: maybe use a separate struct so that we don't have to do this when
-            // transmitting the same iterator type.
-            esp!(rmt_translator_init(
-                self.channel(),
-                Some(Self::translate_iterator::<T, false>),
-            ))?;
-            esp!(rmt_write_sample(
-                self.channel(),
-                &iter as *const _ as _,
-                24,
-                true
-            ))
-        }
-    }
-
-    /// The translator that turns an iterator into `rmt_item32_t` elements. Most of the
-    /// magic happens here.
-    ///
-    /// The general idea is that we can fill a buffer (`dest`) of `rmt_item32_t` items of
-    /// length `wanted_num` with the items that we get from the iterator. Then we can tell
-    /// the peripheral driver how many items we filled in by setting `item_num`. The
-    /// driver will call this function over-and-over until `translated_size` is equal to
-    /// `src_size` so when the iterator returns [`None`] we set `translated_size` to
-    /// `src_size` to signal that there are no more items to translate.
-    ///
-    /// The compiler will generate this function for every different call to
-    /// [`Self::start_iter_blocking`] and [`Self::start_iter`] with different iterator
-    /// types because of the type parameter. This is done to avoid the double indirection
-    /// that we'd have to do when using a trait object since references to trait objects
-    /// are fat-pointers (2 `usize` wide) and we only get a narrow pointer (`src`).
-    /// Using a trait object has the addional overhead that every call to `Iterator::next`
-    /// would also be indirect (through the `vtable`) and couldn't be inlined.
-    unsafe extern "C" fn translate_iterator<T, const DEALLOC_ITER: bool>(
-        src: *const core::ffi::c_void,
-        mut dest: *mut rmt_item32_t,
-        src_size: usize,
-        wanted_num: usize,
-        translated_size: *mut usize,
-        item_num: *mut usize,
-    ) where
-        T: Iterator<Item = rmt_item32_t>,
-    {
-        // An `UnsafeCell` is needed here because we're casting a `*const` to a `*mut`.
-        // Safe because this is the only existing reference.
-        let iter = &mut *UnsafeCell::raw_get(src as *const UnsafeCell<T>);
-
-        let mut i = 0;
-        let finished = loop {
-            if i >= wanted_num {
-                break 0;
-            }
-
-            if let Some(item) = iter.next() {
-                *dest = item;
-                dest = dest.add(1);
-                i += 1;
-            } else {
-                // Only deallocate the iter if the const generics argument is `true`
-                // otherwise we could be deallocating stack memory.
-                #[cfg(feature = "alloc")]
-                if DEALLOC_ITER {
-                    drop(alloc::boxed::Box::from_raw(iter));
-                }
-                break src_size;
-            }
-        };
-
-        *item_num = i;
-        *translated_size = finished;
-    }
-
-    /// Stop transmitting.
-    pub fn stop(&mut self) -> Result<(), EspError> {
-        esp!(unsafe { rmt_tx_stop(self.channel()) })
-    }
-
-    pub fn set_looping(&mut self, looping: config::Loop) -> Result<(), EspError> {
-        esp!(unsafe { rmt_set_tx_loop_mode(self.channel(), looping != config::Loop::None) })?;
-
-        #[cfg(not(any(esp32, esp32c2)))]
-        esp!(unsafe {
-            rmt_set_tx_loop_count(
-                self.channel(),
-                match looping {
-                    config::Loop::Count(count) if count > 0 && count < 1024 => count,
-                    _ => 0,
-                },
-            )
-        })?;
-
-        Ok(())
-    }
-
-    pub fn channel(&self) -> rmt_channel_t {
-        self.channel as _
+    /// Mutate this symbol to store a different pair of half-cycles.
+    pub fn update(&mut self, level0: Pulse, level1: Pulse) {
+        // SAFETY: We're overriding all 32 bits, so it doesn't matter what was here before.
+        let inner = unsafe { &mut self.0.__bindgen_anon_1.__bindgen_anon_1 };
+        inner.set_level0(level0.pin_state as u32);
+        inner.set_duration0(level0.ticks.0 as u32);
+        inner.set_level1(level1.pin_state as u32);
+        inner.set_duration1(level1.ticks.0 as u32);
     }
 }
-
-impl<'d> Drop for TxRmtDriver<'d> {
-    /// Stop transmitting and release the driver.
-    fn drop(&mut self) {
-        self.stop().unwrap();
-        esp!(unsafe { rmt_driver_uninstall(self.channel()) }).unwrap();
-    }
-}
-
-unsafe impl<'d> Send for TxRmtDriver<'d> {}
 
 /// Signal storage for [`Transmit`] in a format ready for the RMT driver.
 pub trait Signal {
     fn as_slice(&self) -> &[rmt_item32_t];
+}
+
+impl Signal for Symbol {
+    fn as_slice(&self) -> &[rmt_item32_t] {
+        slice::from_ref(&self.0)
+    }
+}
+
+impl Signal for [rmt_item32_t] {
+    fn as_slice(&self) -> &[rmt_item32_t] {
+        self
+    }
 }
 
 /// Stack based signal storage for an RMT signal.
@@ -769,15 +582,11 @@ impl<const N: usize> FixedLengthSignal<N> {
         let item = self
             .0
             .get_mut(index)
-            .ok_or_else(|| EspError::from(ERANGE as i32).unwrap())?;
+            .ok_or_else(|| EspError::from(ERR_ERANGE).unwrap())?;
 
-        // SAFETY: We're overriding all 32 bits, so it doesn't matter what was here before.
-        let inner = unsafe { &mut item.__bindgen_anon_1.__bindgen_anon_1 };
-        inner.set_level0(pair.0.pin_state as u32);
-        inner.set_duration0(pair.0.ticks.0 as u32);
-        inner.set_level1(pair.1.pin_state as u32);
-        inner.set_duration1(pair.1.ticks.0 as u32);
-
+        let mut symbol = Symbol(*item);
+        symbol.update(pair.0, pair.1);
+        *item = symbol.0;
         Ok(())
     }
 }
@@ -807,7 +616,6 @@ impl<const N: usize> Default for FixedLengthSignal<N> {
 /// signal.push(Pulse::new(PinState::High, PulseTicks::new(10)));
 /// signal.push(Pulse::new(PinState::Low, PulseTicks::new(9)));
 /// ```
-
 #[cfg(feature = "alloc")]
 #[derive(Clone, Default)]
 pub struct VariableLengthSignal {
@@ -834,7 +642,7 @@ impl VariableLengthSignal {
     /// - `capacity` is the number of [`Pulse`]s which can be pushes before reallocating
     pub fn with_capacity(capacity: usize) -> Self {
         // half the size, rounding up, because each entry in the [`Vec`] holds upto 2 pulses each
-        let vec_size = (capacity + 1) / 2;
+        let vec_size = capacity.div_ceil(2);
         Self {
             items: alloc::vec::Vec::with_capacity(vec_size),
             next_item_is_new: true,
@@ -899,178 +707,483 @@ pub enum Receive {
     Timeout,
 }
 
-/// The RMT receiver.
-///
-/// Use [`RxRmtDriver::start()`] to receive pulses.
-///
-/// See the [rmt module][crate::rmt] for more information.
-pub struct RxRmtDriver<'d> {
-    channel: u8,
-    next_ringbuf_item: Option<(*mut rmt_item32_t, usize)>,
-    _p: PhantomData<&'d mut ()>,
-}
+#[cfg(any(feature = "rmt-legacy", esp_idf_version_major = "4"))]
+mod driver {
+    use core::cell::UnsafeCell;
+    use core::marker::PhantomData;
+    use core::ptr;
 
-impl<'d> RxRmtDriver<'d> {
-    /// Initialise the rmt module with the specified pin, channel and configuration.
+    use config::{ReceiveConfig, TransmitConfig};
+    use esp_idf_sys::{
+        esp, rmt_config_t, rmt_config_t__bindgen_ty_1, rmt_item32_t, rmt_mode_t_RMT_MODE_TX,
+        rmt_set_tx_loop_mode, rmt_tx_config_t, rmt_tx_stop, vRingbufferReturnItem, EspError,
+        RMT_CHANNEL_FLAGS_AWARE_DFS,
+    };
+    use esp_idf_sys::{rmt_channel_t, rmt_driver_uninstall};
+
+    use crate::gpio::InputPin;
+    use crate::interrupt::InterruptType;
+    use crate::{gpio::OutputPin, peripheral::Peripheral};
+
+    use super::RmtChannel;
+
+    use super::*;
+
+    /// The RMT transmitter driver.
     ///
-    /// To uninstall the driver just drop it.
+    /// Use [`TxRmtDriver::start()`] or [`TxRmtDriver::start_blocking()`] to transmit pulses.
     ///
-    /// Internally this calls `rmt_config()` and `rmt_driver_install()`.
-
-    pub fn new<C: RmtChannel>(
-        _channel: impl Peripheral<P = C> + 'd,
-        pin: impl Peripheral<P = impl InputPin> + 'd,
-        config: &ReceiveConfig,
-        ring_buf_size: usize,
-    ) -> Result<Self, EspError> {
-        crate::into_ref!(pin);
-
-        #[cfg(not(any(esp32, esp32c2)))]
-        let carrier_en = config.carrier.is_some();
-
-        #[cfg(not(any(esp32, esp32c2)))]
-        let carrier = config.carrier.unwrap_or_default();
-
-        let config = rmt_config_t {
-            rmt_mode: rmt_mode_t_RMT_MODE_RX,
-            channel: C::channel(),
-            gpio_num: pin.pin(),
-            clk_div: config.clock_divider,
-            mem_block_num: config.mem_block_num,
-            flags: 0,
-            __bindgen_anon_1: rmt_config_t__bindgen_ty_1 {
-                rx_config: rmt_rx_config_t {
-                    idle_threshold: config.idle_threshold,
-                    filter_ticks_thresh: config.filter_ticks_thresh,
-                    filter_en: config.filter_en,
-                    #[cfg(not(any(esp32, esp32c2)))]
-                    rm_carrier: carrier_en,
-                    #[cfg(not(any(esp32, esp32c2)))]
-                    carrier_freq_hz: carrier.frequency.into(),
-                    #[cfg(not(any(esp32, esp32c2)))]
-                    carrier_level: carrier.carrier_level as u32,
-                    #[cfg(not(any(esp32, esp32c2)))]
-                    carrier_duty_percent: carrier.duty_percent.0,
-                },
-            },
-        };
-
-        unsafe {
-            esp!(rmt_config(&config))?;
-            esp!(rmt_driver_install(C::channel(), ring_buf_size * 4, 0))?;
-        }
-
-        Ok(Self {
-            channel: C::channel() as _,
-            next_ringbuf_item: None,
-            _p: PhantomData,
-        })
+    /// See the [rmt module][crate::rmt] for more information.
+    pub struct TxRmtDriver<'d> {
+        channel: u8,
+        _p: PhantomData<&'d mut ()>,
     }
 
-    pub fn channel(&self) -> rmt_channel_t {
-        self.channel as _
-    }
+    impl<'d> TxRmtDriver<'d> {
+        /// Initialise the rmt module with the specified pin, channel and configuration.
+        ///
+        /// To uninstall the driver just drop it.
+        ///
+        /// Internally this calls `rmt_config()` and `rmt_driver_install()`.
+        pub fn new<C: RmtChannel>(
+            _channel: impl Peripheral<P = C> + 'd,
+            pin: impl Peripheral<P = impl OutputPin> + 'd,
+            config: &TransmitConfig,
+        ) -> Result<Self, EspError> {
+            crate::into_ref!(pin);
 
-    /// Start receiving
-    pub fn start(&self) -> Result<(), EspError> {
-        esp!(unsafe { rmt_rx_start(self.channel(), true) })
-    }
-
-    /// Stop receiving
-    pub fn stop(&self) -> Result<(), EspError> {
-        esp!(unsafe { rmt_rx_stop(self.channel()) })
-    }
-
-    pub fn receive(
-        &mut self,
-        buf: &mut [(Pulse, Pulse)],
-        ticks_to_wait: TickType_t,
-    ) -> Result<Receive, EspError> {
-        if let Some(items) = self.fetch_ringbuf_next_item(ticks_to_wait)? {
-            if items.len() <= buf.len() {
-                for (index, item) in items.iter().enumerate() {
-                    let item = unsafe { item.__bindgen_anon_1.__bindgen_anon_1 };
-
-                    buf[index] = (
-                        Pulse::new(
-                            item.level0().into(),
-                            PulseTicks::new(item.duration0().try_into().unwrap()).unwrap(),
-                        ),
-                        Pulse::new(
-                            item.level1().into(),
-                            PulseTicks::new(item.duration1().try_into().unwrap()).unwrap(),
-                        ),
-                    );
-                }
-
-                let len = items.len();
-
-                self.return_ringbuf_item()?;
-
-                Ok(Receive::Read(len))
-            } else {
-                Ok(Receive::Overflow(items.len()))
+            let mut flags = 0;
+            if config.aware_dfs {
+                flags |= RMT_CHANNEL_FLAGS_AWARE_DFS;
             }
-        } else {
-            Ok(Receive::Timeout)
-        }
-    }
 
-    fn fetch_ringbuf_next_item(
-        &mut self,
-        ticks_to_wait: TickType_t,
-    ) -> Result<Option<&[rmt_item32_t]>, EspError> {
-        if let Some((rmt_items, length)) = self.next_ringbuf_item {
-            Ok(Some(unsafe {
-                core::slice::from_raw_parts(rmt_items, length)
-            }))
-        } else {
-            let mut ringbuf_handle = ptr::null_mut();
-            esp!(unsafe { rmt_get_ringbuf_handle(self.channel(), &mut ringbuf_handle) })?;
+            let carrier_en = config.carrier.is_some();
+            let carrier = config.carrier.unwrap_or_default();
 
-            let mut length = 0;
-            let rmt_items: *mut rmt_item32_t = unsafe {
-                xRingbufferReceive(ringbuf_handle.cast(), &mut length, ticks_to_wait).cast()
+            let sys_config = rmt_config_t {
+                rmt_mode: rmt_mode_t_RMT_MODE_TX,
+                channel: C::channel(),
+                gpio_num: pin.pin(),
+                clk_div: config.clock_divider,
+                mem_block_num: config.mem_block_num,
+                flags,
+                __bindgen_anon_1: rmt_config_t__bindgen_ty_1 {
+                    tx_config: rmt_tx_config_t {
+                        carrier_en,
+                        carrier_freq_hz: carrier.frequency.into(),
+                        carrier_level: carrier.carrier_level as u32,
+                        carrier_duty_percent: carrier.duty_percent.0,
+                        idle_output_en: config.idle.is_some(),
+                        idle_level: config.idle.map(|i| i as u32).unwrap_or(0),
+                        loop_en: config.looping != config::Loop::None,
+                        #[cfg(any(
+                            all(
+                                not(esp_idf_version_major = "4"),
+                                not(esp_idf_version_major = "5")
+                            ),
+                            all(esp_idf_version_major = "5", not(esp_idf_version_minor = "0")),
+                            not(esp32)
+                        ))]
+                        loop_count: match config.looping {
+                            config::Loop::Count(count) if count > 0 && count < 1024 => count,
+                            _ => 0,
+                        },
+                    },
+                },
             };
 
-            if rmt_items.is_null() {
-                Ok(None)
-            } else {
-                let length = length / 4;
-                self.next_ringbuf_item = Some((rmt_items, length));
+            unsafe {
+                esp!(rmt_config(&sys_config))?;
+                esp!(rmt_driver_install(
+                    C::channel(),
+                    0,
+                    InterruptType::to_native(config.intr_flags) as _
+                ))?;
+            }
 
+            Ok(Self {
+                channel: C::channel() as _,
+                _p: PhantomData,
+            })
+        }
+
+        /// Get speed of the channel’s internal counter clock.
+        ///
+        /// This calls [rmt_get_counter_clock()][rmt_get_counter_clock]
+        /// internally. It is used for calculating the number of ticks per second for pulses.
+        ///
+        /// See [Pulse::new_with_duration()].
+        ///
+        /// [rmt_get_counter_clock]: https://docs.espressif.com/projects/esp-idf/en/latest/esp32/api-reference/peripherals/rmt.html#_CPPv421rmt_get_counter_clock13rmt_channel_tP8uint32_t
+        pub fn counter_clock(&self) -> Result<Hertz, EspError> {
+            let mut ticks_hz: u32 = 0;
+            esp!(unsafe { rmt_get_counter_clock(self.channel(), &mut ticks_hz) })?;
+            Ok(ticks_hz.into())
+        }
+
+        /// Start sending the given signal without blocking.
+        ///
+        /// `signal` is captured for safety so that the user can't change the data while transmitting.
+        pub fn start<S>(&mut self, signal: S) -> Result<(), EspError>
+        where
+            S: Signal,
+        {
+            self.write_items(&signal, false)
+        }
+
+        /// Start sending the given signal while blocking.
+        pub fn start_blocking<S>(&mut self, signal: &S) -> Result<(), EspError>
+        where
+            S: Signal + ?Sized,
+        {
+            self.write_items(signal, true)
+        }
+
+        fn write_items<S>(&mut self, signal: &S, block: bool) -> Result<(), EspError>
+        where
+            S: Signal + ?Sized,
+        {
+            let items = signal.as_slice();
+            esp!(unsafe {
+                rmt_write_items(self.channel(), items.as_ptr(), items.len() as i32, block)
+            })
+        }
+
+        /// Transmit all items in `iter` without blocking.
+        ///
+        /// Note that this requires `iter` to be [`Box`]ed for an allocation free version see [`Self::start_iter_blocking`].
+        ///
+        /// ### Warning
+        ///
+        /// Iteration of `iter` happens inside an interrupt handler so beware of side-effects
+        /// that don't work in interrupt handlers. Iteration must also be fast so that there
+        /// are no time-gaps between successive transmissions where the perhipheral has to
+        /// wait for items. This can cause weird behavior and can be counteracted with
+        /// increasing [`Config::mem_block_num`] or making iteration more efficient.
+        #[cfg(feature = "alloc")]
+        pub fn start_iter<T>(&mut self, iter: T) -> Result<(), EspError>
+        where
+            T: Iterator<Item = Symbol> + Send + 'static,
+        {
+            let iter = alloc::boxed::Box::new(UnsafeCell::new(iter));
+            unsafe {
+                esp!(rmt_translator_init(
+                    self.channel(),
+                    Some(Self::translate_iterator::<T, true>),
+                ))?;
+
+                esp!(rmt_write_sample(
+                    self.channel(),
+                    alloc::boxed::Box::leak(iter) as *const _ as _,
+                    1,
+                    false
+                ))
+            }
+        }
+
+        /// Transmit all items in `iter`, blocking until all items are transmitted.
+        ///
+        /// This method does not require any allocations since the thread is paused until all
+        /// items are transmitted. The iterator lives on the stack and will be dropped after
+        /// all items are written and before this method returns.
+        ///
+        /// ### Warning
+        ///
+        /// Iteration of `iter` happens inside an interrupt handler so beware of side-effects
+        /// that don't work in interrupt handlers. Iteration must also be fast so that there
+        /// are no time-gaps between successive transmissions where the perhipheral has to
+        /// wait for items. This can cause weird behavior and can be counteracted with
+        /// increasing [`Config::mem_block_num`] or making iteration more efficient.
+        pub fn start_iter_blocking<T>(&mut self, iter: T) -> Result<(), EspError>
+        where
+            T: Iterator<Item = Symbol> + Send,
+        {
+            let iter = UnsafeCell::new(iter);
+            unsafe {
+                // TODO: maybe use a separate struct so that we don't have to do this when
+                // transmitting the same iterator type.
+                esp!(rmt_translator_init(
+                    self.channel(),
+                    Some(Self::translate_iterator::<T, false>),
+                ))?;
+                esp!(rmt_write_sample(
+                    self.channel(),
+                    &iter as *const _ as _,
+                    24,
+                    true
+                ))
+            }
+        }
+
+        /// The translator that turns an iterator into `rmt_item32_t` elements. Most of the
+        /// magic happens here.
+        ///
+        /// The general idea is that we can fill a buffer (`dest`) of `rmt_item32_t` items of
+        /// length `wanted_num` with the items that we get from the iterator. Then we can tell
+        /// the peripheral driver how many items we filled in by setting `item_num`. The
+        /// driver will call this function over-and-over until `translated_size` is equal to
+        /// `src_size` so when the iterator returns [`None`] we set `translated_size` to
+        /// `src_size` to signal that there are no more items to translate.
+        ///
+        /// The compiler will generate this function for every different call to
+        /// [`Self::start_iter_blocking`] and [`Self::start_iter`] with different iterator
+        /// types because of the type parameter. This is done to avoid the double indirection
+        /// that we'd have to do when using a trait object since references to trait objects
+        /// are fat-pointers (2 `usize` wide) and we only get a narrow pointer (`src`).
+        /// Using a trait object has the addional overhead that every call to `Iterator::next`
+        /// would also be indirect (through the `vtable`) and couldn't be inlined.
+        unsafe extern "C" fn translate_iterator<T, const DEALLOC_ITER: bool>(
+            src: *const core::ffi::c_void,
+            mut dest: *mut rmt_item32_t,
+            src_size: usize,
+            wanted_num: usize,
+            translated_size: *mut usize,
+            item_num: *mut usize,
+        ) where
+            T: Iterator<Item = Symbol>,
+        {
+            // An `UnsafeCell` is needed here because we're casting a `*const` to a `*mut`.
+            // Safe because this is the only existing reference.
+            let iter = &mut *UnsafeCell::raw_get(src as *const UnsafeCell<T>);
+
+            let mut i = 0;
+            let finished = loop {
+                if i >= wanted_num {
+                    break 0;
+                }
+
+                if let Some(item) = iter.next() {
+                    *dest = item.0;
+                    dest = dest.add(1);
+                    i += 1;
+                } else {
+                    // Only deallocate the iter if the const generics argument is `true`
+                    // otherwise we could be deallocating stack memory.
+                    #[cfg(feature = "alloc")]
+                    if DEALLOC_ITER {
+                        drop(alloc::boxed::Box::from_raw(iter));
+                    }
+                    break src_size;
+                }
+            };
+
+            *item_num = i;
+            *translated_size = finished;
+        }
+
+        /// Stop transmitting.
+        pub fn stop(&mut self) -> Result<(), EspError> {
+            esp!(unsafe { rmt_tx_stop(self.channel()) })
+        }
+
+        pub fn set_looping(&mut self, looping: config::Loop) -> Result<(), EspError> {
+            esp!(unsafe { rmt_set_tx_loop_mode(self.channel(), looping != config::Loop::None) })?;
+
+            #[cfg(not(any(esp32, esp32c2)))]
+            esp!(unsafe {
+                rmt_set_tx_loop_count(
+                    self.channel(),
+                    match looping {
+                        config::Loop::Count(count) if count > 0 && count < 1024 => count,
+                        _ => 0,
+                    },
+                )
+            })?;
+
+            Ok(())
+        }
+
+        pub fn channel(&self) -> rmt_channel_t {
+            self.channel as _
+        }
+    }
+
+    impl Drop for TxRmtDriver<'_> {
+        /// Stop transmitting and release the driver.
+        fn drop(&mut self) {
+            self.stop().unwrap();
+            esp!(unsafe { rmt_driver_uninstall(self.channel()) }).unwrap();
+        }
+    }
+
+    unsafe impl Send for TxRmtDriver<'_> {}
+
+    /// The RMT receiver.
+    ///
+    /// Use [`RxRmtDriver::start()`] to receive pulses.
+    ///
+    /// See the [rmt module][crate::rmt] for more information.
+    pub struct RxRmtDriver<'d> {
+        channel: u8,
+        next_ringbuf_item: Option<(*mut rmt_item32_t, usize)>,
+        _p: PhantomData<&'d mut ()>,
+    }
+
+    impl<'d> RxRmtDriver<'d> {
+        /// Initialise the rmt module with the specified pin, channel and configuration.
+        ///
+        /// To uninstall the driver just drop it.
+        ///
+        /// Internally this calls `rmt_config()` and `rmt_driver_install()`.
+        pub fn new<C: RmtChannel>(
+            _channel: impl Peripheral<P = C> + 'd,
+            pin: impl Peripheral<P = impl InputPin> + 'd,
+            config: &ReceiveConfig,
+            ring_buf_size: usize,
+        ) -> Result<Self, EspError> {
+            crate::into_ref!(pin);
+
+            #[cfg(not(any(esp32, esp32c2)))]
+            let carrier_en = config.carrier.is_some();
+
+            #[cfg(not(any(esp32, esp32c2)))]
+            let carrier = config.carrier.unwrap_or_default();
+
+            let sys_config = rmt_config_t {
+                rmt_mode: rmt_mode_t_RMT_MODE_RX,
+                channel: C::channel(),
+                gpio_num: pin.pin(),
+                clk_div: config.clock_divider,
+                mem_block_num: config.mem_block_num,
+                flags: 0,
+                __bindgen_anon_1: rmt_config_t__bindgen_ty_1 {
+                    rx_config: rmt_rx_config_t {
+                        idle_threshold: config.idle_threshold,
+                        filter_ticks_thresh: config.filter_ticks_thresh,
+                        filter_en: config.filter_en,
+                        #[cfg(not(any(esp32, esp32c2)))]
+                        rm_carrier: carrier_en,
+                        #[cfg(not(any(esp32, esp32c2)))]
+                        carrier_freq_hz: carrier.frequency.into(),
+                        #[cfg(not(any(esp32, esp32c2)))]
+                        carrier_level: carrier.carrier_level as u32,
+                        #[cfg(not(any(esp32, esp32c2)))]
+                        carrier_duty_percent: carrier.duty_percent.0,
+                    },
+                },
+            };
+
+            unsafe {
+                esp!(rmt_config(&sys_config))?;
+                esp!(rmt_driver_install(
+                    C::channel(),
+                    ring_buf_size * 4,
+                    InterruptType::to_native(config.intr_flags) as _
+                ))?;
+            }
+
+            Ok(Self {
+                channel: C::channel() as _,
+                next_ringbuf_item: None,
+                _p: PhantomData,
+            })
+        }
+
+        pub fn channel(&self) -> rmt_channel_t {
+            self.channel as _
+        }
+
+        /// Start receiving
+        pub fn start(&self) -> Result<(), EspError> {
+            esp!(unsafe { rmt_rx_start(self.channel(), true) })
+        }
+
+        /// Stop receiving
+        pub fn stop(&self) -> Result<(), EspError> {
+            esp!(unsafe { rmt_rx_stop(self.channel()) })
+        }
+
+        pub fn receive(
+            &mut self,
+            buf: &mut [(Pulse, Pulse)],
+            ticks_to_wait: TickType_t,
+        ) -> Result<Receive, EspError> {
+            if let Some(items) = self.fetch_ringbuf_next_item(ticks_to_wait)? {
+                if items.len() <= buf.len() {
+                    for (index, item) in items.iter().enumerate() {
+                        let item = unsafe { item.__bindgen_anon_1.__bindgen_anon_1 };
+
+                        buf[index] = (
+                            Pulse::new(
+                                item.level0().into(),
+                                PulseTicks::new(item.duration0().try_into().unwrap()).unwrap(),
+                            ),
+                            Pulse::new(
+                                item.level1().into(),
+                                PulseTicks::new(item.duration1().try_into().unwrap()).unwrap(),
+                            ),
+                        );
+                    }
+
+                    let len = items.len();
+
+                    self.return_ringbuf_item()?;
+
+                    Ok(Receive::Read(len))
+                } else {
+                    Ok(Receive::Overflow(items.len()))
+                }
+            } else {
+                Ok(Receive::Timeout)
+            }
+        }
+
+        fn fetch_ringbuf_next_item(
+            &mut self,
+            ticks_to_wait: TickType_t,
+        ) -> Result<Option<&[rmt_item32_t]>, EspError> {
+            if let Some((rmt_items, length)) = self.next_ringbuf_item {
                 Ok(Some(unsafe {
                     core::slice::from_raw_parts(rmt_items, length)
                 }))
+            } else {
+                let mut ringbuf_handle = ptr::null_mut();
+                esp!(unsafe { rmt_get_ringbuf_handle(self.channel(), &mut ringbuf_handle) })?;
+
+                let mut length = 0;
+                let rmt_items: *mut rmt_item32_t = unsafe {
+                    xRingbufferReceive(ringbuf_handle.cast(), &mut length, ticks_to_wait).cast()
+                };
+
+                if rmt_items.is_null() {
+                    Ok(None)
+                } else {
+                    let length = length / 4;
+                    self.next_ringbuf_item = Some((rmt_items, length));
+
+                    Ok(Some(unsafe {
+                        core::slice::from_raw_parts(rmt_items, length)
+                    }))
+                }
             }
+        }
+
+        fn return_ringbuf_item(&mut self) -> Result<(), EspError> {
+            let mut ringbuf_handle = ptr::null_mut();
+            esp!(unsafe { rmt_get_ringbuf_handle(self.channel(), &mut ringbuf_handle) })?;
+
+            if let Some((rmt_items, _)) = self.next_ringbuf_item.take() {
+                unsafe {
+                    vRingbufferReturnItem(ringbuf_handle, rmt_items.cast());
+                }
+            } else {
+                unreachable!();
+            }
+
+            Ok(())
         }
     }
 
-    fn return_ringbuf_item(&mut self) -> Result<(), EspError> {
-        let mut ringbuf_handle = ptr::null_mut();
-        esp!(unsafe { rmt_get_ringbuf_handle(self.channel(), &mut ringbuf_handle) })?;
-
-        if let Some((rmt_items, _)) = core::mem::replace(&mut self.next_ringbuf_item, None) {
-            unsafe {
-                vRingbufferReturnItem(ringbuf_handle, rmt_items.cast());
-            }
-        } else {
-            unreachable!();
+    impl Drop for RxRmtDriver<'_> {
+        /// Stop receiving and release the driver.
+        fn drop(&mut self) {
+            self.stop().unwrap();
+            esp!(unsafe { rmt_driver_uninstall(self.channel()) }).unwrap();
         }
-
-        Ok(())
     }
-}
 
-impl<'d> Drop for RxRmtDriver<'d> {
-    /// Stop receiving and release the driver.
-    fn drop(&mut self) {
-        self.stop().unwrap();
-        esp!(unsafe { rmt_driver_uninstall(self.channel()) }).unwrap();
-    }
+    unsafe impl Send for RxRmtDriver<'_> {}
 }
-
-unsafe impl<'d> Send for RxRmtDriver<'d> {}
 
 mod chip {
     use esp_idf_sys::*;

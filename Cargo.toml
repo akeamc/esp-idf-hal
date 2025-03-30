@@ -1,8 +1,8 @@
 [package]
 name = "esp-idf-hal"
-version = "0.40.0"
+version = "0.45.2"
 authors = ["sapir <yasapir@gmail.com>", "Ivan Markov <ivan.markov@gmail.com>"]
-edition = "2018"
+edition = "2021"
 resolver = "2"
 categories = ["embedded", "hardware-support"]
 keywords = ["hal", "idf", "esp-idf", "esp32"]
@@ -10,34 +10,63 @@ description = "A Hardware abstraction layer for Espressif's ESP family of microc
 repository = "https://github.com/esp-rs/esp-idf-hal"
 license = "MIT OR Apache-2.0"
 readme = "README.md"
-documentation = "https://esp-rs.github.io/esp-idf-hal/"
-rust-version = "1.61"
+links = "esp_idf_hal"
+build = "build.rs"
+documentation = "https://docs.esp-rs.org/esp-idf-hal/"
+rust-version = "1.75"
+
+[lib]
+harness = false
 
 [features]
-default = ["std", "alloc", "esp-idf-sys"]
-std = ["alloc", "esp-idf-sys/std", "edge-executor?/std"]
+default = ["std", "binstart"]
+std = ["alloc", "esp-idf-sys/std"]
 alloc = []
-riscv-ulp-hal = []
+nightly = []
+experimental = []
+wake-from-isr = [] # Only enable if you plan to use the `edge-executor` crate
+embassy-sync = [] # For now, the dependecy on the `embassy-sync` crate is non-optional, but this might change in future
+# Temporary, until (https://github.com/espressif/esp-idf/issues/13938) is addressed
+# - When enabled, the code for the legacy ADC oneshot driver will be compiled;
+# - When not enabled (default) the code for the new ADC oneshot driver will be compiled;
+# - Since we don't wrap the legacy _continuous_ ADC driver, the new _continuous_ ADC driver is always compiled.
+adc-oneshot-legacy = []
+# Similar to adc-oneshot-legacy
+# - When enabled (default), the code for the legacy RMT TX/RX driver will be compiled.
+# - When disabled the code for the new onewire RMT driver will be compiled. 
+rmt-legacy = []
+# Propagated esp-idf-sys features
+native = ["esp-idf-sys/native"]
+pio = ["esp-idf-sys/pio"]
+alloc_handler = ["esp-idf-sys/alloc_handler"]
+panic_handler = ["esp-idf-sys/panic_handler"]
+binstart = ["esp-idf-sys/binstart"]
+libstart = ["esp-idf-sys/libstart"]
 
 [dependencies]
-nb = "1.0.0"
+nb = "1"
 embedded-can = "0.4.1"
-embedded-hal = "=1.0.0-alpha.9"
+embedded-hal = "1"
 embedded-hal-0-2 = { package = "embedded-hal", version = "0.2.7", features = ["unproven"] }
-embedded-hal-nb = "=1.0.0-alpha.1"
-esp-idf-sys = { version = "0.32", optional = true, default-features = false, features = ["native"] }
-critical-section = { version = "1.1", optional = true }
-heapless = "0.7"
-embassy-sync = { version = "0.1", optional = true }
-edge-executor = { version = "0.3", optional = true, default-features = false }
+embedded-hal-nb = "1"
+embedded-hal-async = "1"
+embedded-io = "0.6"
+embedded-io-async = "0.6"
+esp-idf-sys = { version = "0.36", default-features = false }
+critical-section = { version = "1.1.1", optional = true, features = ["restore-state-none"] }
+heapless = "0.8"
+num_enum = { version = "0.7", default-features = false }
+enumset = { version = "1.1.4", default-features = false }
+log = { version = "0.4", default-features = false }
+atomic-waker = { version = "1.1.1", default-features = false }
+embassy-sync = { version = "0.6" }
 
 [build-dependencies]
-embuild = "0.31"
-anyhow = "1"
+embuild = "0.33"
 
 [dev-dependencies]
 anyhow = "1"
-esp-idf-sys = { version = "0.32", features = ["native", "binstart"] }
+esp-idf-sys = { version = "0.36", features = ["binstart"] }
 mipidsi = "0.5.0"
 display-interface-spi = "0.4.1"
 embedded-graphics = "0.7.1"

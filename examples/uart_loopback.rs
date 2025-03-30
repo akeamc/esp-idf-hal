@@ -1,8 +1,8 @@
 //! UART loopback test
 //!
 //! Folowing pins are used:
-//! TX    GPIO5
-//! RX    GPIO6
+//! TX    GPIO12
+//! RX    GPIO13
 //!
 //! Depending on your target and the board you are using you have to change the pins.
 //!
@@ -16,11 +16,11 @@ use esp_idf_hal::prelude::*;
 use esp_idf_hal::uart::*;
 
 fn main() -> anyhow::Result<()> {
-    esp_idf_sys::link_patches();
+    esp_idf_hal::sys::link_patches();
 
-    let peripherals = Peripherals::take().unwrap();
-    let tx = peripherals.pins.gpio5;
-    let rx = peripherals.pins.gpio6;
+    let peripherals = Peripherals::take()?;
+    let tx = peripherals.pins.gpio12;
+    let rx = peripherals.pins.gpio13;
 
     println!("Starting UART loopback test");
     let config = config::Config::new().baudrate(Hertz(115_200));
@@ -31,8 +31,7 @@ fn main() -> anyhow::Result<()> {
         Option::<gpio::Gpio0>::None,
         Option::<gpio::Gpio1>::None,
         &config,
-    )
-    .unwrap();
+    )?;
 
     loop {
         uart.write(&[0xaa])?;

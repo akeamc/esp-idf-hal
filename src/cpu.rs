@@ -3,11 +3,13 @@ use core::arch::asm;
 
 use esp_idf_sys::*;
 
+use enumset::EnumSetType;
+
 /// Returns the number of cores supported by the esp32* chip
 pub const CORES: u32 = SOC_CPU_CORES_NUM;
 
+#[derive(Debug, EnumSetType)]
 #[repr(C)]
-#[derive(Copy, Clone, Eq, PartialEq, Debug)]
 pub enum Core {
     Core0 = 0, // PRO on dual-core systems, the one and only CPU on single-core systems
     #[cfg(any(esp32, esp32s3))]
@@ -48,21 +50,21 @@ impl From<i32> for Core {
 #[inline(always)]
 #[link_section = ".iram1.cpu_core"]
 pub fn core() -> Core {
-    #[cfg(any(esp32c3, esp32s2))]
+    #[cfg(any(esp32c3, esp32s2, esp32c2, esp32h2, esp32c5, esp32c6))]
     let core = 0;
 
     #[allow(unused_assignments)]
-    #[cfg(any(esp32, esp32s3))]
+    #[cfg(any(esp32, esp32s3, esp32p4))]
     let mut core = 0;
 
-    #[cfg(any(esp32, esp32s3))]
+    #[cfg(any(esp32, esp32s3))] // TODO: Need a way to get the running core on esp32p4 in future
     unsafe {
         asm!("rsr.prid {0}", "extui {0},{0},13,1", out(reg) core);
     }
 
     match core {
         0 => Core::Core0,
-        #[cfg(any(esp32, esp32s3))]
+        #[cfg(any(esp32, esp32s3, esp32p4))]
         1 => Core::Core1,
         other => panic!("Unknown core: {}", other),
     }

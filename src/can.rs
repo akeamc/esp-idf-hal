@@ -32,11 +32,23 @@
 //! }
 //! ```
 
+use core::borrow::BorrowMut;
+use core::ffi::CStr;
+use core::marker::PhantomData;
+use core::num::NonZeroU32;
+
+use enumset::{EnumSet, EnumSetType};
+
 use esp_idf_sys::*;
 
-use crate::delay::{BLOCK, NON_BLOCK};
-use crate::gpio::*;
+use num_enum::TryFromPrimitive;
+
+use crate::cpu::Core;
+use crate::delay::{self, BLOCK, NON_BLOCK};
+use crate::interrupt::InterruptType;
 use crate::peripheral::{Peripheral, PeripheralRef};
+use crate::task::asynch::Notification;
+use crate::{gpio::*, task};
 
 crate::embedded_hal_error!(CanError, embedded_can::Error, embedded_can::ErrorKind);
 
@@ -49,7 +61,12 @@ crate::embedded_hal_error!(
 pub type CanConfig = config::Config;
 
 pub mod config {
+    use enumset::EnumSet;
     use esp_idf_sys::*;
+
+    use crate::interrupt::InterruptType;
+
+    use super::Alert;
 
     /// CAN timing
     #[derive(Debug, Copy, Clone, Eq, PartialEq)]
@@ -80,7 +97,6 @@ pub mod config {
                     tseg_1: 16,
                     tseg_2: 8,
                     sjw: 3,
-                    triple_sampling: false,
                     ..Default::default()
                 },
                 Timing::B50K => twai_timing_config_t {
@@ -88,7 +104,6 @@ pub mod config {
                     tseg_1: 15,
                     tseg_2: 4,
                     sjw: 3,
-                    triple_sampling: false,
                     ..Default::default()
                 },
                 Timing::B100K => twai_timing_config_t {
@@ -96,7 +111,6 @@ pub mod config {
                     tseg_1: 15,
                     tseg_2: 4,
                     sjw: 3,
-                    triple_sampling: false,
                     ..Default::default()
                 },
                 Timing::B125K => twai_timing_config_t {
@@ -104,7 +118,6 @@ pub mod config {
                     tseg_1: 15,
                     tseg_2: 4,
                     sjw: 3,
-                    triple_sampling: false,
                     ..Default::default()
                 },
                 Timing::B250K => twai_timing_config_t {
@@ -112,7 +125,6 @@ pub mod config {
                     tseg_1: 15,
                     tseg_2: 4,
                     sjw: 3,
-                    triple_sampling: false,
                     ..Default::default()
                 },
                 Timing::B500K => twai_timing_config_t {
@@ -120,7 +132,6 @@ pub mod config {
                     tseg_1: 15,
                     tseg_2: 4,
                     sjw: 3,
-                    triple_sampling: false,
                     ..Default::default()
                 },
                 Timing::B800K => twai_timing_config_t {
@@ -128,7 +139,6 @@ pub mod config {
                     tseg_1: 16,
                     tseg_2: 8,
                     sjw: 3,
-                    triple_sampling: false,
                     ..Default::default()
                 },
                 Timing::B1M => twai_timing_config_t {
@@ -136,7 +146,6 @@ pub mod config {
                     tseg_1: 15,
                     tseg_2: 4,
                     sjw: 3,
-                    triple_sampling: false,
                     ..Default::default()
                 },
                 Timing::Custom {
@@ -150,7 +159,24 @@ pub mod config {
                     tseg_1: timing_segment_1,
                     tseg_2: timing_segment_2,
                     sjw: synchronization_jump_width,
+                    #[cfg(any(
+                        esp_idf_version_major = "4",
+                        esp_idf_version = "5.0",
+                        esp_idf_version = "5.1",
+                        esp_idf_version = "5.2",
+                        esp_idf_version = "5.3",
+                        esp_idf_version = "5.4"
+                    ))]
                     triple_sampling,
+                    #[cfg(not(any(
+                        esp_idf_version_major = "4",
+                        esp_idf_version = "5.0",
+                        esp_idf_version = "5.1",
+                        esp_idf_version = "5.2",
+                        esp_idf_version = "5.3",
+                        esp_idf_version = "5.4"
+                    )))]
+                    __bindgen_anon_1: twai_timing_config_t__bindgen_ty_1 { triple_sampling },
                     ..Default::default()
                 },
             }
@@ -211,9 +237,16 @@ pub mod config {
     /// ```
     #[derive(Debug, Copy, Clone, Eq, PartialEq)]
     pub enum Filter {
-        // Filter for 11 bit standard CAN IDs
+        /// Filter for 11 bit standard CAN IDs
         Standard { filter: u16, mask: u16 },
-        // Filter for 29 bit extended CAN IDs
+        /// Filter for two 11 bit standard CAN IDs
+        Dual {
+            filter1: u16,
+            mask1: u16,
+            filter2: u16,
+            mask2: u16,
+        },
+        /// Filter for 29 bit extended CAN IDs
         Extended { filter: u32, mask: u32 },
     }
 
@@ -236,14 +269,45 @@ pub mod config {
     }
 
     #[derive(Debug, Copy, Clone, Default)]
+    pub enum Mode {
+        #[default]
+        Normal,
+        NoAck,
+        ListenOnly,
+    }
+
+    impl From<Mode> for twai_mode_t {
+        fn from(val: Mode) -> Self {
+            match val {
+                Mode::Normal => twai_mode_t_TWAI_MODE_NORMAL,
+                Mode::NoAck => twai_mode_t_TWAI_MODE_NO_ACK,
+                Mode::ListenOnly => twai_mode_t_TWAI_MODE_LISTEN_ONLY,
+            }
+        }
+    }
+
+    #[derive(Debug, Clone)]
     pub struct Config {
         pub timing: Timing,
         pub filter: Filter,
+        pub tx_queue_len: u32,
+        pub rx_queue_len: u32,
+        pub mode: Mode,
+        pub alerts: EnumSet<Alert>,
+        pub intr_flags: EnumSet<InterruptType>,
     }
 
     impl Config {
         pub fn new() -> Self {
-            Default::default()
+            Self {
+                timing: Default::default(),
+                filter: Default::default(),
+                tx_queue_len: 5,
+                rx_queue_len: 5,
+                mode: Default::default(),
+                alerts: Default::default(),
+                intr_flags: EnumSet::<InterruptType>::empty(),
+            }
         }
 
         #[must_use]
@@ -257,113 +321,198 @@ pub mod config {
             self.filter = filter;
             self
         }
+
+        #[must_use]
+        pub fn tx_queue_len(mut self, tx_queue_len: u32) -> Self {
+            self.tx_queue_len = tx_queue_len;
+            self
+        }
+
+        #[must_use]
+        pub fn rx_queue_len(mut self, rx_queue_len: u32) -> Self {
+            self.rx_queue_len = rx_queue_len;
+            self
+        }
+
+        #[must_use]
+        pub fn mode(mut self, mode: Mode) -> Self {
+            self.mode = mode;
+            self
+        }
+
+        #[must_use]
+        pub fn alerts(mut self, alerts: EnumSet<Alert>) -> Self {
+            self.alerts = alerts;
+            self
+        }
+
+        #[must_use]
+        pub fn intr_flags(mut self, flags: EnumSet<InterruptType>) -> Self {
+            self.intr_flags = flags;
+            self
+        }
+    }
+
+    impl Default for Config {
+        fn default() -> Self {
+            Self::new()
+        }
     }
 }
 
-/// CAN abstraction
-pub struct CanDriver<'d>(PeripheralRef<'d, CAN>);
+#[derive(Debug, EnumSetType, TryFromPrimitive)]
+#[enumset(repr = "u32")]
+#[repr(u32)]
+pub enum Alert {
+    TransmitIdle = 1,
+    Success = 2,
+    Received = 3,
+    BelowErrorWarning = 4,
+    ActiveError = 5,
+    RecoveryInProgress = 6,
+    BusRecovered = 7,
+    ArbLost = 8,
+    AboveErrorWarning = 9,
+    BusError = 10,
+    TransmitFailed = 11,
+    ReceiveQueueFull = 12,
+    ErrorPass = 13,
+    BusOffline = 14,
+    ReceiveFifoOverflow = 15,
+    TransmitRetried = 16,
+    PeripheralReset = 17,
+    AlertAndLog = 18,
+}
 
-unsafe impl<'d> Send for CanDriver<'d> {}
+/// CAN abstraction
+pub struct CanDriver<'d>(PeripheralRef<'d, CAN>, EnumSet<Alert>, bool);
 
 impl<'d> CanDriver<'d> {
     pub fn new(
         can: impl Peripheral<P = CAN> + 'd,
         tx: impl Peripheral<P = impl OutputPin> + 'd,
-        rx: impl Peripheral<P = impl OutputPin> + 'd,
+        rx: impl Peripheral<P = impl InputPin> + 'd,
         config: &config::Config,
     ) -> Result<Self, EspError> {
         crate::into_ref!(can, tx, rx);
 
+        #[allow(clippy::needless_update)]
         let general_config = twai_general_config_t {
-            mode: twai_mode_t_TWAI_MODE_NORMAL,
+            mode: config.mode.into(),
             tx_io: tx.pin(),
             rx_io: rx.pin(),
             clkout_io: -1,
             bus_off_io: -1,
-            tx_queue_len: 5,
-            rx_queue_len: 5,
-            alerts_enabled: TWAI_ALERT_NONE,
+            tx_queue_len: config.tx_queue_len,
+            rx_queue_len: config.rx_queue_len,
+            alerts_enabled: config.alerts.as_repr(),
             clkout_divider: 0,
-            intr_flags: ESP_INTR_FLAG_LEVEL1 as i32,
+            intr_flags: InterruptType::to_native(config.intr_flags) as _,
+            ..Default::default()
         };
 
         let timing_config = config.timing.into();
 
         // modify filter and mask to be compatible with TWAI acceptance filter
-        let (filter, mask) = match config.filter {
+        let (filter, mask, single_filter) = match config.filter {
             config::Filter::Standard { filter, mask } => {
-                ((filter as u32) << 21, !((mask as u32) << 21))
+                ((filter as u32) << 21, !((mask as u32) << 21), true)
             }
-            config::Filter::Extended { filter, mask } => (filter << 3, !(mask << 3)),
+            config::Filter::Extended { filter, mask } => (filter << 3, !(mask << 3), true),
+            config::Filter::Dual {
+                filter1,
+                mask1,
+                filter2,
+                mask2,
+            } => (
+                ((filter1 as u32) << 21) | ((filter2 as u32) << 5),
+                !(((mask1 as u32) << 21) | ((mask2 as u32) << 5)),
+                false,
+            ),
         };
 
         let filter_config = twai_filter_config_t {
             acceptance_code: filter,
             acceptance_mask: mask,
-            single_filter: true,
+            single_filter,
         };
 
         esp!(unsafe { twai_driver_install(&general_config, &timing_config, &filter_config) })?;
-        esp!(unsafe { twai_start() })?;
 
-        Ok(Self(can))
+        Ok(Self(can, config.alerts, config.tx_queue_len > 0))
     }
 
-    pub fn transmit(&mut self, frame: &Frame, timeout: TickType_t) -> Result<(), EspError> {
+    pub fn start(&mut self) -> Result<(), EspError> {
+        esp!(unsafe { twai_start() })
+    }
+
+    pub fn stop(&mut self) -> Result<(), EspError> {
+        esp!(unsafe { twai_stop() })
+    }
+
+    pub fn transmit(&self, frame: &Frame, timeout: TickType_t) -> Result<(), EspError> {
         esp!(unsafe { twai_transmit(&frame.0, timeout) })
     }
 
-    pub fn receive(&mut self, timeout: TickType_t) -> Result<Frame, EspError> {
-        let mut rx_msg = twai_message_t {
-            ..Default::default()
-        };
+    pub fn receive(&self, timeout: TickType_t) -> Result<Frame, EspError> {
+        let mut rx_msg = Default::default();
 
         match esp_result!(unsafe { twai_receive(&mut rx_msg, timeout) }, ()) {
             Ok(_) => Ok(Frame(rx_msg)),
             Err(err) => Err(err),
         }
     }
+
+    pub fn read_alerts(&self, timeout: TickType_t) -> Result<EnumSet<Alert>, EspError> {
+        let mut alerts = 0;
+
+        esp!(unsafe { twai_read_alerts(&mut alerts, timeout) })?;
+
+        Ok(EnumSet::from_repr_truncated(alerts))
+    }
 }
 
-impl<'d> Drop for CanDriver<'d> {
+impl Drop for CanDriver<'_> {
     fn drop(&mut self) {
-        esp!(unsafe { twai_stop() }).unwrap();
+        let _ = self.stop();
         esp!(unsafe { twai_driver_uninstall() }).unwrap();
     }
 }
 
-impl<'d> embedded_hal_0_2::blocking::can::Can for CanDriver<'d> {
+unsafe impl Send for CanDriver<'_> {}
+
+impl embedded_hal_0_2::blocking::can::Can for CanDriver<'_> {
     type Frame = Frame;
     type Error = Can02Error;
 
     fn transmit(&mut self, frame: &Self::Frame) -> Result<(), Self::Error> {
-        self.transmit(frame, BLOCK).map_err(Can02Error::other)
+        CanDriver::transmit(self, frame, BLOCK).map_err(Can02Error::other)
     }
 
     fn receive(&mut self) -> Result<Self::Frame, Self::Error> {
-        self.receive(BLOCK).map_err(Can02Error::other)
+        CanDriver::receive(self, BLOCK).map_err(Can02Error::other)
     }
 }
 
-impl<'d> embedded_can::blocking::Can for CanDriver<'d> {
+impl embedded_can::blocking::Can for CanDriver<'_> {
     type Frame = Frame;
     type Error = CanError;
 
     fn transmit(&mut self, frame: &Self::Frame) -> Result<(), Self::Error> {
-        self.transmit(frame, BLOCK).map_err(CanError::other)
+        CanDriver::transmit(self, frame, BLOCK).map_err(CanError::other)
     }
 
     fn receive(&mut self) -> Result<Self::Frame, Self::Error> {
-        self.receive(BLOCK).map_err(CanError::other)
+        CanDriver::receive(self, BLOCK).map_err(CanError::other)
     }
 }
 
-impl<'d> embedded_hal_0_2::can::nb::Can for CanDriver<'d> {
+impl embedded_hal_0_2::can::nb::Can for CanDriver<'_> {
     type Frame = Frame;
     type Error = Can02Error;
 
     fn transmit(&mut self, frame: &Self::Frame) -> nb::Result<Option<Self::Frame>, Self::Error> {
-        match self.transmit(frame, NON_BLOCK) {
+        match CanDriver::transmit(self, frame, NON_BLOCK) {
             Ok(_) => Ok(None),
             Err(e) if e.code() == ESP_FAIL => Err(nb::Error::WouldBlock),
             Err(e) if e.code() == ESP_ERR_TIMEOUT => Err(nb::Error::WouldBlock),
@@ -372,7 +521,7 @@ impl<'d> embedded_hal_0_2::can::nb::Can for CanDriver<'d> {
     }
 
     fn receive(&mut self) -> nb::Result<Self::Frame, Self::Error> {
-        match self.receive(NON_BLOCK) {
+        match CanDriver::receive(self, NON_BLOCK) {
             Ok(frame) => Ok(frame),
             Err(e) if e.code() == ESP_ERR_TIMEOUT => Err(nb::Error::WouldBlock),
             Err(e) => Err(nb::Error::Other(Can02Error::other(e))),
@@ -380,12 +529,12 @@ impl<'d> embedded_hal_0_2::can::nb::Can for CanDriver<'d> {
     }
 }
 
-impl<'d> embedded_can::nb::Can for CanDriver<'d> {
+impl embedded_can::nb::Can for CanDriver<'_> {
     type Frame = Frame;
     type Error = CanError;
 
     fn transmit(&mut self, frame: &Self::Frame) -> nb::Result<Option<Self::Frame>, Self::Error> {
-        match self.transmit(frame, NON_BLOCK) {
+        match CanDriver::transmit(self, frame, NON_BLOCK) {
             Ok(_) => Ok(None),
             Err(e) if e.code() == ESP_FAIL => Err(nb::Error::WouldBlock),
             Err(e) if e.code() == ESP_ERR_TIMEOUT => Err(nb::Error::WouldBlock),
@@ -394,36 +543,249 @@ impl<'d> embedded_can::nb::Can for CanDriver<'d> {
     }
 
     fn receive(&mut self) -> nb::Result<Self::Frame, Self::Error> {
-        match self.receive(NON_BLOCK) {
+        match CanDriver::receive(self, NON_BLOCK) {
             Ok(frame) => Ok(frame),
             Err(e) if e.code() == ESP_ERR_TIMEOUT => Err(nb::Error::WouldBlock),
             Err(e) => Err(nb::Error::Other(CanError::other(e))),
         }
     }
+}
+
+fn read_alerts() -> EnumSet<Alert> {
+    Alert::Success | Alert::Received | Alert::ReceiveQueueFull
+}
+
+fn write_alerts() -> EnumSet<Alert> {
+    Alert::Success | Alert::TransmitIdle | Alert::TransmitFailed | Alert::TransmitRetried
+}
+
+pub type OwnedAsyncCanDriver<'d> = AsyncCanDriver<'d, CanDriver<'d>>;
+
+pub struct AsyncCanDriver<'d, T>
+where
+    T: BorrowMut<CanDriver<'d>>,
+{
+    driver: T,
+    task: TaskHandle_t,
+    _data: PhantomData<&'d ()>,
+}
+
+impl<'d> AsyncCanDriver<'d, CanDriver<'d>> {
+    pub fn new(
+        can: impl Peripheral<P = CAN> + 'd,
+        tx: impl Peripheral<P = impl OutputPin> + 'd,
+        rx: impl Peripheral<P = impl InputPin> + 'd,
+        config: &config::Config,
+    ) -> Result<Self, EspError> {
+        Self::wrap(CanDriver::new(can, tx, rx, config)?)
+    }
+}
+
+impl<'d, T> AsyncCanDriver<'d, T>
+where
+    T: BorrowMut<CanDriver<'d>>,
+{
+    pub fn wrap(driver: T) -> Result<Self, EspError> {
+        Self::wrap_custom(driver, None, None)
+    }
+
+    pub fn wrap_custom(
+        mut driver: T,
+        priority: Option<u8>,
+        pin_to_core: Option<Core>,
+    ) -> Result<Self, EspError> {
+        let _ = driver.borrow_mut().stop();
+
+        let mut alerts = 0;
+        esp!(unsafe {
+            twai_reconfigure_alerts(
+                driver
+                    .borrow()
+                    .1
+                    .union(read_alerts())
+                    .union(write_alerts())
+                    .as_repr(),
+                &mut alerts,
+            )
+        })?;
+
+        let task = unsafe {
+            task::create(
+                Self::process_alerts,
+                CStr::from_bytes_until_nul(b"CAN - Alerts task\0").unwrap(),
+                2048,
+                core::ptr::null_mut(),
+                priority.unwrap_or(6),
+                pin_to_core,
+            )?
+        };
+
+        Ok(Self {
+            driver,
+            task,
+            _data: PhantomData,
+        })
+    }
+
+    pub fn driver(&self) -> &CanDriver<'d> {
+        self.driver.borrow()
+    }
+
+    pub fn driver_mut(&mut self) -> &mut CanDriver<'d> {
+        self.driver.borrow_mut()
+    }
+
+    pub fn start(&mut self) -> Result<(), EspError> {
+        self.driver.borrow_mut().start()
+    }
+
+    pub fn stop(&mut self) -> Result<(), EspError> {
+        self.driver.borrow_mut().stop()
+    }
+
+    pub async fn transmit(&self, frame: &Frame) -> Result<(), EspError> {
+        loop {
+            let res = self.driver.borrow().transmit(frame, delay::NON_BLOCK);
+
+            match res {
+                Ok(()) => return Ok(()),
+                Err(e)
+                    if e.code() != ESP_ERR_TIMEOUT
+                        && (e.code() != ESP_FAIL || self.driver.borrow().2) =>
+                {
+                    return Err(e)
+                }
+                _ => (),
+            }
+
+            WRITE_NOTIFICATION.wait().await;
+        }
+    }
+
+    pub async fn receive(&self) -> Result<Frame, EspError> {
+        loop {
+            let res = self.driver.borrow().receive(delay::NON_BLOCK);
+
+            match res {
+                Ok(frame) => return Ok(frame),
+                Err(e) if e.code() != ESP_ERR_TIMEOUT => return Err(e),
+                _ => (),
+            }
+
+            READ_NOTIFICATION.wait().await;
+        }
+    }
+
+    pub async fn read_alerts(&self) -> Result<EnumSet<Alert>, EspError> {
+        let alerts = loop {
+            let alerts = EnumSet::from_repr(ALERT_NOTIFICATION.wait().await.into())
+                .intersection(self.driver.borrow().1);
+
+            if !alerts.is_empty() {
+                break alerts;
+            }
+        };
+
+        Ok(alerts)
+    }
+
+    extern "C" fn process_alerts(_arg: *mut core::ffi::c_void) {
+        let mut alerts = 0;
+
+        loop {
+            if unsafe { twai_read_alerts(&mut alerts, delay::BLOCK) } == 0 {
+                let ealerts: EnumSet<Alert> = EnumSet::from_repr_truncated(alerts);
+
+                if !ealerts.is_disjoint(read_alerts()) {
+                    READ_NOTIFICATION.notify_lsb();
+                }
+
+                if !ealerts.is_disjoint(write_alerts()) {
+                    WRITE_NOTIFICATION.notify_lsb();
+                }
+
+                if let Some(alerts) = NonZeroU32::new(alerts) {
+                    ALERT_NOTIFICATION.notify(alerts);
+                }
+            }
+        }
+    }
+}
+
+impl<'d, T> Drop for AsyncCanDriver<'d, T>
+where
+    T: BorrowMut<CanDriver<'d>>,
+{
+    fn drop(&mut self) {
+        let _ = self.stop();
+
+        unsafe { task::destroy(self.task) };
+
+        let mut alerts = 0;
+        esp!(unsafe { twai_reconfigure_alerts(self.driver.borrow().1.as_repr(), &mut alerts) })
+            .unwrap();
+
+        READ_NOTIFICATION.reset();
+        WRITE_NOTIFICATION.reset();
+        ALERT_NOTIFICATION.reset();
+    }
+}
+
+unsafe impl<'d, T> Send for AsyncCanDriver<'d, T> where T: BorrowMut<CanDriver<'d>> + Send {}
+
+static READ_NOTIFICATION: Notification = Notification::new();
+static WRITE_NOTIFICATION: Notification = Notification::new();
+static ALERT_NOTIFICATION: Notification = Notification::new();
+
+/// Twai message flags
+#[derive(Debug, EnumSetType)]
+pub enum Flags {
+    /// Message is in Extended Frame Format (29bit ID)
+    Extended,
+    ///  Message is a Remote Frame (Remote Transmission Request)
+    Remote,
+    /// Transmit message using Single Shot Transmission
+    /// (Message will not be retransmitted upon error or loss of arbitration).
+    /// Unused for received message.
+    SingleShot,
+    /// Transmit message using Self Reception Request
+    /// (Transmitted message will also received by the same node).
+    /// Unused for received message.
+    SelfReception,
+    /// Message's Data length code is larger than 8.
+    /// This will break compliance with TWAI
+    DlcNonComp,
+    None,
 }
 
 pub struct Frame(twai_message_t);
 
 impl Frame {
-    pub fn new(id: u32, extended: bool, data: &[u8]) -> Option<Self> {
+    pub fn new(id: u32, flags: EnumSet<Flags>, data: &[u8]) -> Option<Self> {
         let dlc = data.len();
 
         if dlc <= 8 {
             // unions are not very well supported in rust
             // therefore setting those union flags is quite hairy
-            let mut flags = twai_message_t__bindgen_ty_1::default();
+            let mut twai_flags = twai_message_t__bindgen_ty_1::default();
 
-            // set bits in an union
-            unsafe { flags.__bindgen_anon_1.set_ss(1) };
-            if extended {
-                unsafe { flags.__bindgen_anon_1.set_extd(1) };
+            // Iterate over the flags set and set the corresponding bits in the union
+            for flag in flags.iter() {
+                match flag {
+                    Flags::Extended => unsafe { twai_flags.__bindgen_anon_1.set_extd(1) },
+                    Flags::Remote => unsafe { twai_flags.__bindgen_anon_1.set_rtr(1) },
+                    Flags::SingleShot => unsafe { twai_flags.__bindgen_anon_1.set_ss(1) },
+                    Flags::SelfReception => unsafe { twai_flags.__bindgen_anon_1.set_self(1) },
+                    Flags::DlcNonComp => unsafe { twai_flags.__bindgen_anon_1.set_dlc_non_comp(1) },
+                    Flags::None => {}
+                }
             }
 
             let mut payload = [0; 8];
             payload[..dlc].copy_from_slice(data);
 
             let twai_message = twai_message_t {
-                __bindgen_anon_1: flags,
+                __bindgen_anon_1: twai_flags,
                 identifier: id,
                 data_length_code: dlc as u8,
                 data: payload,
@@ -443,7 +805,6 @@ impl Frame {
 
             // set bits in an union
             unsafe { flags.__bindgen_anon_1.set_rtr(1) };
-            unsafe { flags.__bindgen_anon_1.set_ss(1) };
             if extended {
                 unsafe { flags.__bindgen_anon_1.set_extd(1) };
             }
@@ -484,24 +845,34 @@ impl Frame {
 
 impl core::fmt::Display for Frame {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(
-            f,
-            "Frame {{ id: {}, remote: {}, data: {:?} }}",
-            self.identifier(),
-            self.is_remote_frame(),
-            self.data()
-        )
+        if self.is_extended() {
+            write!(
+                f,
+                "Frame {{ id: {:08x}, remote: {}, data: {:?} }}",
+                self.identifier(),
+                self.is_remote_frame(),
+                self.data()
+            )
+        } else {
+            write!(
+                f,
+                "Frame {{ id: {:03x}, remote: {}, data: {:?} }}",
+                self.identifier(),
+                self.is_remote_frame(),
+                self.data()
+            )
+        }
     }
 }
 
 impl embedded_hal_0_2::can::Frame for Frame {
     fn new(id: impl Into<embedded_hal_0_2::can::Id>, data: &[u8]) -> Option<Self> {
-        let (id, extended) = match id.into() {
-            embedded_hal_0_2::can::Id::Standard(id) => (id.as_raw() as u32, false),
-            embedded_hal_0_2::can::Id::Extended(id) => (id.as_raw(), true),
+        let (id, flags) = match id.into() {
+            embedded_hal_0_2::can::Id::Standard(id) => (id.as_raw() as u32, Flags::None),
+            embedded_hal_0_2::can::Id::Extended(id) => (id.as_raw(), Flags::Extended),
         };
 
-        Self::new(id, extended, data)
+        Self::new(id, flags.into(), data)
     }
 
     fn new_remote(id: impl Into<embedded_hal_0_2::can::Id>, dlc: usize) -> Option<Self> {
@@ -552,12 +923,12 @@ impl embedded_hal_0_2::can::Frame for Frame {
 
 impl embedded_can::Frame for Frame {
     fn new(id: impl Into<embedded_can::Id>, data: &[u8]) -> Option<Self> {
-        let (id, extended) = match id.into() {
-            embedded_can::Id::Standard(id) => (id.as_raw() as u32, false),
-            embedded_can::Id::Extended(id) => (id.as_raw(), true),
+        let (id, flags) = match id.into() {
+            embedded_can::Id::Standard(id) => (id.as_raw() as u32, Flags::None),
+            embedded_can::Id::Extended(id) => (id.as_raw(), Flags::Extended),
         };
 
-        Self::new(id, extended, data)
+        Self::new(id, flags.into(), data)
     }
 
     fn new_remote(id: impl Into<embedded_can::Id>, dlc: usize) -> Option<Self> {

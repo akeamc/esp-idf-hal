@@ -5,6 +5,200 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Deprecated
+- `DB_11` ADC attenuation in favor of `DB_12` for ESP-IDF V5.0+
+
+### Added
+- `Send` for `AsyncCanDriver`
+- `DB_12` ADC attenuation
+- `fade_with_time`, `fade_with_step` for `LedcDriver`
+
+### Fixed
+- Fix the SDMMC driver for ESP-IDF V5.5+
+- Replace Arc with Rc in ledc_threads example (#514)
+- Fix outdated task docs
+
+## [0.45.2] - 2025-01-15
+
+### Fixed
+- Fix ledc example (#511)
+- Fix missing sdspi_host_get_dma_info for sdcard driver bug (#509)
+
+## [0.45.1] - 2025-01-10
+
+### Fixed
+- Fix RGB to u32 conversion order in rmt_neopixel example (#505)
+- Fix missing sdmmc_host_get_dma_info for sdcard driver bug (#507)
+
+## [0.45.0] - 2025-01-02
+
+### Deprecated
+
+### Breaking
+- Make the UART config to ESP-IDF  C config reusable outside the UART driver (for OpenThread)
+- Re-use the SPI config struct of the SPI driver (for OpenThread)
+- Add a `usb_serial` peripheral to the `Peripherals` struct for MCUs that do support the USB-serial-jtag peripheral (#503)
+- UART default baud rate changed from 19'200 to 115'200
+
+### Added
+- Compatibility with ESP-IDF v5.3.X
+- Docs: Add some docstrings for ADC module. (#455)
+- Update uart.rs, add rs485 half duplex (#456)
+- Update spi.rs, fix half3wire read (#459)
+- SPI: Mark DMA as supported in the docu
+- SD Card driver; SD Card host drivers (SPI and SDMMC) (#457)
+- RMT Onewire Peripheral (#454)
+- Add an example of using interrupt directly without async (#474)
+- Add support for ESP internal temperature sensor (#337)
+- Support the thread modem peripheral on the c6 MCU
+- Add dual and quad SPI support (#479)
+- Initial USB-serial-jtag driver (#504)
+
+### Fixed
+- Fix: UartDriver as embedded_io::Read blocks until buffer is full (#475)
+- Allow modem splits even when only HW coex is used
+- Fix esp_reset_reason_t constant names (#483)
+- Fix drop for AdcDriver in deregister event callbacks (#487)
+- Typo fix in task docs (#489)
+- Update spi.rs for correct label in gpio_cs capture (#492)
+- Fix a crash when dropping `SpiDriver`
+
+## [0.44.1] - 2024-07-09
+### Fixed
+* The crate now does build with ESP-IDF V4.4.x + esp32c2/esp32c6/esp32h2, yet these MCUs should only be used with ESP-IDF V5+ 
+  as they are not officially supported with ESP-IDF V4.4.x (#450)
+* Enum `ResetReason` not dealing with all reset reasons (panics on unknown reset reason) (#443, #444)
+
+## [0.44.0] - 2024-06-23
+### Deprecated
+**ESP-IDF v4.4** Please start upgrading to ESP-IDF v5.
+### Breaking
+* **removed**: ESP-IDF v4.3 support, including mostly conditional compilations. (#420)
+* GPIO20 is now included on esp32. Notice that not every esp32 has a physical GPIO20. (#370)
+* ledc: now it can also be used with high_speed channels on esp32. (#424)
+* dependency: updated embassy-sync to 0.6. (#437)
+* adc: legacy adc driver is now behind a feature flag `adc-oneshot-legacy` starting with >= ESP-IDF v5.0. For justification, look at https://github.com/espressif/esp-idf/issues/13938. (#433)
+* spi: cs_pre/post_trans_delay() config option included. (#266)
+### Added
+* rmt: `Symbol` now derives `Clone` and `Copy` (#386)
+* reset: restart() function (#383)
+* pcnt: Can now be used with esp32c6. (#407)
+* can: Frame flags enum (#411)
+* task: added MallocCap enum - Flag to indicate the capabilities of a Memory Region. (#419)
+* i2s: new I2sDriver implementation allowing for splited bidirectional i2s. (#435)
+* spi: added new_without_sclk SpiDriver constructor (#440)
+### Fixed
+* esp32h2 builds: added missing hys_ctrl_mode field (#387)
+* rmt: FixedLengthSignal was broken, which led to failures in the neopixel/smartled examples, among other things. (#402)
+* e-hal 0.2: implements DelayUs and DelayMs for u8 to be consistent with the other implementations (#414)
+* i2c: wrong timeout calculations. (#415)
+* task: Compatibility with ESP-iDF v5.3 (pre-release) - adding stack_alloc_caps to `ThreadSpawnConfiguration`. (#419)
+* i2s: Compatibility with ESP-IDF v5.3 (pre-release) - small internal adjustments to i2s (#419)
+* ledc: max_duty() method miscalulated in certain conditions. (#431)
+* timer: fix clock usage in timer driver used with ESP-IDF v5.x (#441)
+* i2c: use correct xtal for esp32c2 on timeout calculations. (#438)
+ 
+## [0.43.1] - 2024-02-21
+* Fix - PinDriver state changes and the drop call invoked pull-ups to be enabled. New default behavior on init / state transition / drop is to not enable pull-ups. (#344). If users want to reduce power usage on unused pins, they now need to manually enable pull-ups on a pin. For example, call `core::mem::forget` on the PinDriver instance after setting the pull-ups.
+* #354 - breaking change - `rmt` driver now does not directly expose `rmt_item32_t` but rather - wraps it with a `Symbol` newtype
+* #374 - Improve delay/timer errors and rounding calculations
+* #379 - Remove 4096 limit for SPI dma transfer size
+* Fix clippy duplicate imports warnings with latest 1.78 nightly
+
+## [0.43.0] - 2024-01-26
+* Breaking change: feature `riscv-ulp-hal` (and consequently, feature `esp-idf-sys`) is now removed. Use the [esp-ulp-riscv-hal](https://github.com/esp-rs/esp-hal/tree/main/esp-ulp-riscv-hal) crate instead
+* MSRV 1.75; remove the nightly feature flag from all async trait implementations
+* Update public dependencies `e-hal` to 1.0.0 and `embassy-sync` to 0.5 and private dependency `heapless` to 0.8
+* Allow `cargo check --all-features` to work correctly (there used to be a build error when both the `esp-idf-sys` and the `riscv-ulp-hal` features were enabled)
+* #365 - Async Uart driver is not `Send`
+* #362 - Async Uart write hangs forever
+* #353 - Use the `PLL_F80M` clock source with ESP IDF 5.1 and esp32c6
+* #351 - Remove the `OutputPin` requirement from SPI SDI pin
+* #350 - Not checking for ESP_FAIL in AsyncCanDriver::transmit
+
+## [0.42.5] - 2023-11-12
+* BREAKING CHANGE IN A PATCH RELEASE DUE TO DISCOVERED UB: The `subscribe` methods in drivers `PinDriver`, `PcntDriver` and `TimerDriver` 
+no longer accept non-static callbacks, as these lead to UB / crash when the driver is forgotten with e.g. `core::mem::forget`. Since local borrows
+are a very useful feature however, these are still allowed via the newly-introduced and even more unsafe `subscribe_nonstatic` method.
+
+## [0.42.4] - 2023-11-02
+* Remove dependency on `AtomicU64` which is no longer supported by the upstream `*-espidf` targets
+* Fix some Clippy warnings in the `spi` driver
+
+## [0.42.3] - 2023-10-29
+* Fix Timer array index bug #331 - prevented the use of TIMER10 on devices that support only 2 Timers
+* Fix wrong TIMER11 index definition that declared TIMER11 as TIMER10 #331
+
+## [0.42.2] - 2023-10-28
+* Support for latest ESP IDF 5.2 dev (master)
+
+## [0.42.1] - 2023-10-18
+* Fix ambiguous name error #325 - a compilation issue when the NimBLE component is enabled in `esp-idf-sys`
+* Fix compilation issues of the I2S driver for esp32h2 and esp32c2
+* Fix compilation issues of the ADC drivers when the ESP IDF `esp_adc` component is not enabled
+* Fix compilation issues of the GPIO driver for esp32c6
+
+## [0.42.0] - 2023-10-17
+* MSRV raised to 1.71
+* New driver: I2S
+* New driver: continuous ADC
+* New driver: snapshot ADC, implementing the new ESP-IDF 5.0+ snapshot ADC API
+* Async support in the following drivers: Timer, SPI, I2S, continuous ADC, CAN (via an `AsyncCanDriver` wrapper), UART (via an `AsyncUartDriver` wrapper)
+* All async drivers can now work out of the box with any executor (`edge-executor` no longer a necessity) via a new ISR-to-task bridge (`esp_idf_hal::interrupt::asynch::IsrReactor`)
+* CAN driver: support for pulling alerts in blocking and async mode
+* UART driver: support for pulling UART events
+* GPIO driver: scoped callback; `subscribe` callback now needs to live only as long as the `PinDriver` instance
+* Timer driver: scoped callback; `subscribe` callback now needs to live only as long as the `TimerDriver` instance
+* `task` and `interrupt` modules: new submodule in each - `asynch` - featuring a signal/notification-like synchronization primitive
+* `task` module: `block_on` method capable of executing a future on the current thread
+* `task` module: new sub-module - `queue` for the FreeRTOS `queue` synchonization primitive
+* `task` module: new sub-module - `notification` - a more ergonomic API around the FreeRTOS task notification API
+   which was already exposed via the `task::notify` and `task::wait_notification` APIs
+* Upgraded to `embedded-hal` 1.0.0-rc.1 and `embedded-hal-async` 1.0.0-rc.1
+* Dependency `esp-idf-sys` now re-exported as `esp_idf_hal::sys`
+* Breaking change: `Peripherals::take` now returns an error when the peripherals are already taken
+* Breaking change: `delay::Delay` struct extended with configurable threshold
+* Breaking change: `task::wait_any_notification` removed; `task::notify` renamed to `task::notify_and_yield`; new function - `task::notify` - that notifies a task without automatically yielding to the notified task if it is a higher priority than the currently interrupted one
+* Breaking change: `task::notify*` and `task::wait` now take/return `NonZeroU32` instead of `u32`
+* Breaking change: GPIO - interrupts are now disabled automatically each time an ISR is triggered so as to avoid the IWDT triggering on level interrupts; use has to re-enable - in non-ISR code - via `PinDriver::enable_interrupt()`
+* Breaking change: ESP IDF support for `edge-executor` moved to the `edge-executor` crate
+* Deprecated: Using ESP-IDF 4.3 is now deprecated and all special cfg flags will be removed in the next release
+
+## [0.41.2] - 2023-06-21
+
+* Do not set the single shot flag in the CAN frame (#263)
+* Add safe abstractions to CRC functions in ESP ROM (#261)
+* Use same error for all e-hal 0.2 trait impls (#260)
+* Add support for WakeupReason from Ext0 events (#259)
+* Compilation failed when ESP_IDF_VERSION = "release/v5.1" (#258)
+* Fix UART docs (#252)
+
+## [0.41.1] - 2023-05-21
+
+* UART driver was broken - see #250 for more details
+* Removed a forgotten `[patch.crates-io]` section that was using `esp-idf-sys` from `master` (low impact, only relevant when building the examples)
+* Clippy fixes
+
+## [0.41.0] - 2023-05-13 (Yanked due to #250, see above)
+
+* MSRV 1.66 (but MSRV 1.70 necessary if `nightly` is enabled)
+* Support for new chips: esp32c2, esp32h2, esp32c6 and future proofed for esp32c5 and esp32p4
+* Support for ESP IDF 5.0, 5.1 and 5.2 (master)
+* Support for `embedded-hal` 1.0-alpha.10 and `embedded-hal-async` 0.2.0-alpha.2 (API breakage in i2c and spi)
+* Async GPIO native API with support for `embedded-hal-async`
+* PCNT driver
+* Alerts and Mode support in the TWAI driver
+* Task Watchdog API
+* Configurable interrupt levels in all drivers (minor API breakage in `SpiDriver`)
+* `EspError::from_infallible`
+* Auto-reload support in the timer driver
+
+## [0.40.1] - 2022-12-13
+
+Fix the build when the ULP peripheral is enabled.
+
 ## [0.40] - 2022-12-09
 
 Rebase on top of `esp-idf-sys` 0.32:

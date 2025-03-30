@@ -1,46 +1,47 @@
-#![cfg_attr(not(feature = "std"), no_std)]
+#![no_std]
+#![allow(async_fn_in_trait)]
+#![allow(unknown_lints)]
+#![allow(renamed_and_removed_lints)]
+#![allow(clippy::unused_unit)] // enumset
+#![allow(unexpected_cfgs)]
+#![warn(clippy::large_futures)]
+#![cfg_attr(feature = "nightly", feature(doc_cfg))]
 #![cfg_attr(target_arch = "xtensa", feature(asm_experimental_arch))]
 
-#[cfg(all(not(feature = "riscv-ulp-hal"), not(esp_idf_comp_driver_enabled)))]
+#[cfg(not(esp_idf_comp_driver_enabled))]
 compile_error!("esp-idf-hal requires the `driver` ESP-IDF component to be enabled");
 
-#[cfg(all(
-    any(
-        feature = "std",
-        feature = "alloc",
-        feature = "critical-section-interrupt",
-        feature = "critical-section-mutex"
-    ),
-    feature = "riscv-ulp-hal"
-))]
-compile_error!("Enabling feature `riscv-ulp-hal` implies no other feature is enabled");
+// mutually exclusive features assert
+#[cfg(all(feature = "rmt-legacy", esp_idf_comp_espressif__onewire_bus_enabled))]
+compile_error!("the onewire component cannot be used with the legacy rmt peripheral");
 
-#[cfg(all(feature = "riscv-ulp-hal", not(esp32s2)))]
-compile_error!("Feature `riscv-ulp-hal` is currently only supported on esp32s2");
-
+#[cfg(feature = "std")]
+#[allow(unused_imports)]
 #[macro_use]
-pub mod riscv_ulp_hal;
+extern crate std;
+
+#[cfg(feature = "alloc")]
+#[allow(unused_imports)]
+#[macro_use]
+extern crate alloc;
 
 pub mod adc;
-#[cfg(not(feature = "riscv-ulp-hal"))]
 pub mod can;
-#[cfg(not(feature = "riscv-ulp-hal"))]
 pub mod cpu;
-#[cfg(not(feature = "riscv-ulp-hal"))]
 pub mod delay;
 pub mod gpio;
 #[cfg(all(esp32, esp_idf_version_major = "4"))]
 pub mod hall;
-#[cfg(not(feature = "riscv-ulp-hal"))]
 pub mod i2c;
-#[cfg(not(feature = "riscv-ulp-hal"))]
+#[cfg_attr(
+    feature = "nightly",
+    doc(cfg(all(esp_idf_soc_i2s_supported, esp_idf_comp_driver_enabled)))
+)]
+pub mod i2s;
 pub mod interrupt;
-#[cfg(not(feature = "riscv-ulp-hal"))]
+pub mod io;
 pub mod ledc;
-#[cfg(all(
-    any(all(esp32, esp_idf_eth_use_esp32_emac), esp_idf_eth_use_openeth),
-    not(feature = "riscv-ulp-hal")
-))]
+#[cfg(any(all(esp32, esp_idf_eth_use_esp32_emac), esp_idf_eth_use_openeth))]
 pub mod mac;
 #[cfg(all(
     any(esp32, esp32s3),
@@ -50,27 +51,37 @@ pub mod mac;
 pub mod mcpwm;
 #[cfg(not(feature = "riscv-ulp-hal"))]
 pub mod modem;
+#[cfg(all(
+    esp_idf_soc_rmt_supported,
+    not(esp_idf_version_major = "4"),
+    esp_idf_comp_espressif__onewire_bus_enabled,
+))]
+pub mod onewire;
+#[cfg(any(esp32, esp32s2, esp32s3, esp32c6))]
+pub mod pcnt;
 pub mod peripheral;
 pub mod peripherals;
 pub mod prelude;
-#[cfg(not(feature = "riscv-ulp-hal"))]
 pub mod reset;
-#[cfg(not(feature = "riscv-ulp-hal"))]
 pub mod rmt;
-#[cfg(not(feature = "riscv-ulp-hal"))]
+pub mod rom;
+#[cfg(feature = "experimental")]
+pub mod sd;
 pub mod spi;
-#[cfg(not(feature = "riscv-ulp-hal"))]
+pub mod sys;
 pub mod task;
-#[cfg(not(feature = "riscv-ulp-hal"))]
+#[cfg(all(esp_idf_soc_temp_sensor_supported, esp_idf_version_major = "5"))]
+pub mod temp_sensor;
 pub mod timer;
-#[cfg(not(feature = "riscv-ulp-hal"))]
 pub mod uart;
-#[cfg(all(any(esp32, esp32s2, esp32s3), not(feature = "riscv-ulp-hal")))]
+#[cfg(all(
+    any(esp32, esp32s2, esp32s3, esp32c6, esp32p4),
+    esp_idf_comp_ulp_enabled
+))]
 pub mod ulp;
 pub mod units;
-
-#[cfg(feature = "riscv-ulp-hal")]
-pub use crate::riscv_ulp_hal::delay;
+#[cfg(esp_idf_soc_usb_serial_jtag_supported)]
+pub mod usb_serial;
 
 // This is used to create `embedded_hal` compatible error structs
 // that preserve original `EspError`.
@@ -90,16 +101,13 @@ macro_rules! embedded_hal_error {
             pub fn new(kind: $kind, cause: esp_idf_sys::EspError) -> Self {
                 Self { kind, cause }
             }
-
             pub fn other(cause: esp_idf_sys::EspError) -> Self {
                 Self::new(<$kind>::Other, cause)
             }
-
             pub fn cause(&self) -> esp_idf_sys::EspError {
                 self.cause
             }
         }
-
         impl From<esp_idf_sys::EspError> for $error {
             fn from(e: esp_idf_sys::EspError) -> Self {
                 Self::other(e)

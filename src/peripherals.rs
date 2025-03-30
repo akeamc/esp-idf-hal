@@ -1,15 +1,11 @@
 use crate::adc;
-#[cfg(not(feature = "riscv-ulp-hal"))]
 use crate::can;
 use crate::gpio;
-#[cfg(not(feature = "riscv-ulp-hal"))]
 use crate::i2c;
-#[cfg(not(feature = "riscv-ulp-hal"))]
+#[cfg(esp_idf_soc_i2s_supported)]
+use crate::i2s;
 use crate::ledc;
-#[cfg(all(
-    any(all(esp32, esp_idf_eth_use_esp32_emac), esp_idf_eth_use_openeth),
-    not(feature = "riscv-ulp-hal")
-))]
+#[cfg(any(all(esp32, esp_idf_eth_use_esp32_emac), esp_idf_eth_use_openeth))]
 use crate::mac;
 #[cfg(all(
     any(esp32, esp32s3),
@@ -19,46 +15,72 @@ use crate::mac;
 use crate::mcpwm;
 #[cfg(not(feature = "riscv-ulp-hal"))]
 use crate::modem;
-#[cfg(not(feature = "riscv-ulp-hal"))]
+#[cfg(any(esp32, esp32s2, esp32s3, esp32c6))]
+use crate::pcnt;
 use crate::rmt;
-#[cfg(not(feature = "riscv-ulp-hal"))]
+#[cfg(all(esp_idf_soc_sdmmc_host_supported, feature = "experimental"))]
+use crate::sd;
 use crate::spi;
-#[cfg(not(feature = "riscv-ulp-hal"))]
+#[cfg(any(
+    all(
+        not(any(esp_idf_version_major = "4", esp_idf_version = "5.0")),
+        esp_idf_esp_task_wdt_en
+    ),
+    any(esp_idf_version_major = "4", esp_idf_version = "5.0")
+))]
+use crate::task::watchdog;
+#[cfg(all(esp_idf_soc_temp_sensor_supported, esp_idf_version_major = "5"))]
+use crate::temp_sensor;
 use crate::timer;
-#[cfg(not(feature = "riscv-ulp-hal"))]
 use crate::uart;
 #[cfg(all(
-    any(esp32, esp32s2, esp32s3),
-    not(feature = "riscv-ulp-hal"),
+    any(esp32, esp32s2, esp32s3, esp32c6, esp32p4),
     esp_idf_comp_ulp_enabled
 ))]
 use crate::ulp;
+#[cfg(esp_idf_soc_usb_serial_jtag_supported)]
+use crate::usb_serial;
 
 pub struct Peripherals {
     pub pins: gpio::Pins,
-    #[cfg(not(feature = "riscv-ulp-hal"))]
     pub uart0: uart::UART0,
-    #[cfg(not(feature = "riscv-ulp-hal"))]
     pub uart1: uart::UART1,
-    #[cfg(all(any(esp32, esp32s3), not(feature = "riscv-ulp-hal")))]
+    #[cfg(any(esp32, esp32s3))]
     pub uart2: uart::UART2,
-    #[cfg(not(feature = "riscv-ulp-hal"))]
     pub i2c0: i2c::I2C0,
-    #[cfg(all(not(esp32c3), not(feature = "riscv-ulp-hal")))]
+    #[cfg(not(any(esp32c3, esp32c2, esp32c6)))]
     pub i2c1: i2c::I2C1,
-    #[cfg(not(feature = "riscv-ulp-hal"))]
+    #[cfg(esp_idf_soc_i2s_supported)]
+    pub i2s0: i2s::I2S0,
+    #[cfg(all(esp_idf_soc_i2s_supported, any(esp32, esp32s3)))]
+    pub i2s1: i2s::I2S1,
     pub spi1: spi::SPI1,
-    #[cfg(not(feature = "riscv-ulp-hal"))]
     pub spi2: spi::SPI2,
-    #[cfg(all(not(esp32c3), not(feature = "riscv-ulp-hal")))]
+    #[cfg(any(esp32, esp32s2, esp32s3))]
     pub spi3: spi::SPI3,
     pub adc1: adc::ADC1,
+    #[cfg(any(esp32, esp32s2, esp32s3, esp32c3))]
     pub adc2: adc::ADC2,
+    // TODO: Check the pulse counter story for c2, h2, c5, and p4
+    #[cfg(any(esp32, esp32s2, esp32s3, esp32c6))]
+    pub pcnt0: pcnt::PCNT0,
+    #[cfg(any(esp32, esp32s2, esp32s3, esp32c6))]
+    pub pcnt1: pcnt::PCNT1,
+    #[cfg(any(esp32, esp32s2, esp32s3, esp32c6))]
+    pub pcnt2: pcnt::PCNT2,
+    #[cfg(any(esp32, esp32s2, esp32s3, esp32c6))]
+    pub pcnt3: pcnt::PCNT3,
+    #[cfg(esp32)]
+    pub pcnt4: pcnt::PCNT4,
+    #[cfg(esp32)]
+    pub pcnt5: pcnt::PCNT5,
+    #[cfg(esp32)]
+    pub pcnt6: pcnt::PCNT6,
+    #[cfg(esp32)]
+    pub pcnt7: pcnt::PCNT7,
     #[cfg(all(esp32, esp_idf_version_major = "4"))]
     pub hall_sensor: crate::hall::HallSensor,
-    #[cfg(not(feature = "riscv-ulp-hal"))]
     pub can: can::CAN,
-    #[cfg(not(feature = "riscv-ulp-hal"))]
     pub ledc: ledc::LEDC,
     #[cfg(all(
         any(esp32, esp32s3),
@@ -75,77 +97,59 @@ pub struct Peripherals {
     #[cfg(not(feature = "riscv-ulp-hal"))]
     pub rmt: rmt::RMT,
     #[cfg(all(
-        any(esp32, esp32s2, esp32s3),
-        not(feature = "riscv-ulp-hal"),
+        any(esp32, esp32s2, esp32s3, esp32c6, esp32p4),
         esp_idf_comp_ulp_enabled
     ))]
     pub ulp: ulp::ULP,
-    #[cfg(all(
-        any(all(esp32, esp_idf_eth_use_esp32_emac), esp_idf_eth_use_openeth),
-        not(feature = "riscv-ulp-hal")
-    ))]
+    #[cfg(any(all(esp32, esp_idf_eth_use_esp32_emac), esp_idf_eth_use_openeth))]
     pub mac: mac::MAC,
-    #[cfg(not(feature = "riscv-ulp-hal"))]
     pub modem: modem::Modem,
-    #[cfg(all(
-        not(feature = "riscv-ulp-hal"),
-        not(feature = "embassy-time-isr-queue-timer00")
-    ))]
+    #[cfg(all(esp_idf_soc_sdmmc_host_supported, feature = "experimental"))]
+    pub sdmmc0: sd::mmc::SDMMC0,
+    #[cfg(all(esp_idf_soc_sdmmc_host_supported, feature = "experimental"))]
+    pub sdmmc1: sd::mmc::SDMMC1,
+    #[cfg(all(esp_idf_soc_temp_sensor_supported, esp_idf_version_major = "5"))]
+    pub temp_sensor: temp_sensor::TempSensor,
+    // TODO: Check the timer story for c2, h2, c5, c6, and p4
     pub timer00: timer::TIMER00,
-    #[cfg(all(
-        not(esp32c3),
-        not(feature = "riscv-ulp-hal"),
-        not(feature = "embassy-time-isr-queue-timer01")
-    ))]
+    #[cfg(any(esp32, esp32s2, esp32s3))]
     pub timer01: timer::TIMER01,
-    #[cfg(all(
-        not(feature = "riscv-ulp-hal"),
-        not(feature = "embassy-time-isr-queue-timer10")
-    ))]
+    #[cfg(not(esp32c2))]
     pub timer10: timer::TIMER10,
-    #[cfg(all(
-        not(esp32c3),
-        not(feature = "riscv-ulp-hal"),
-        not(feature = "embassy-time-isr-queue-timer11")
-    ))]
+    #[cfg(any(esp32, esp32s2, esp32s3))]
     pub timer11: timer::TIMER11,
+    #[cfg(any(
+        all(
+            not(any(esp_idf_version_major = "4", esp_idf_version = "5.0")),
+            esp_idf_esp_task_wdt_en
+        ),
+        any(esp_idf_version_major = "4", esp_idf_version = "5.0")
+    ))]
+    pub twdt: watchdog::TWDT,
+    #[cfg(esp_idf_soc_usb_serial_jtag_supported)]
+    pub usb_serial: usb_serial::USB_SERIAL,
 }
 
-#[cfg(feature = "riscv-ulp-hal")]
-static mut TAKEN: bool = false;
-
-#[cfg(not(feature = "riscv-ulp-hal"))]
 static TAKEN: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
-
-#[cfg(not(feature = "riscv-ulp-hal"))]
 static TAKEN_CS: crate::task::CriticalSection = crate::task::CriticalSection::new();
 
 impl Peripherals {
-    #[cfg(feature = "riscv-ulp-hal")]
-    pub fn take() -> Option<Self> {
-        if unsafe { TAKEN } {
-            None
-        } else {
-            unsafe {
-                TAKEN = true;
-            }
-            Some(unsafe { Peripherals::new() })
-        }
-    }
-
-    #[cfg(not(feature = "riscv-ulp-hal"))]
-    pub fn take() -> Option<Self> {
+    pub fn take() -> Result<Self, crate::sys::EspError> {
         if TAKEN.load(core::sync::atomic::Ordering::SeqCst) {
-            None
+            Err(crate::sys::EspError::from_infallible::<
+                { crate::sys::ESP_ERR_INVALID_STATE },
+            >())
         } else {
-            let _ = TAKEN_CS.enter();
+            let _guard = TAKEN_CS.enter();
 
             if !TAKEN.load(core::sync::atomic::Ordering::SeqCst) {
                 TAKEN.store(true, core::sync::atomic::Ordering::SeqCst);
 
-                Some(unsafe { Peripherals::new() })
+                Ok(unsafe { Peripherals::new() })
             } else {
-                None
+                Err(crate::sys::EspError::from_infallible::<
+                    { crate::sys::ESP_ERR_INVALID_STATE },
+                >())
             }
         }
     }
@@ -156,29 +160,43 @@ impl Peripherals {
     pub unsafe fn new() -> Self {
         Self {
             pins: gpio::Pins::new(),
-            #[cfg(not(feature = "riscv-ulp-hal"))]
             uart0: uart::UART0::new(),
-            #[cfg(not(feature = "riscv-ulp-hal"))]
             uart1: uart::UART1::new(),
-            #[cfg(all(any(esp32, esp32s3), not(feature = "riscv-ulp-hal")))]
+            #[cfg(any(esp32, esp32s3))]
             uart2: uart::UART2::new(),
-            #[cfg(not(feature = "riscv-ulp-hal"))]
             i2c0: i2c::I2C0::new(),
-            #[cfg(all(not(esp32c3), not(feature = "riscv-ulp-hal")))]
+            #[cfg(not(any(esp32c3, esp32c2, esp32c6)))]
             i2c1: i2c::I2C1::new(),
-            #[cfg(not(feature = "riscv-ulp-hal"))]
+            #[cfg(esp_idf_soc_i2s_supported)]
+            i2s0: i2s::I2S0::new(),
+            #[cfg(all(esp_idf_soc_i2s_supported, any(esp32, esp32s3)))]
+            i2s1: i2s::I2S1::new(),
             spi1: spi::SPI1::new(),
-            #[cfg(not(feature = "riscv-ulp-hal"))]
             spi2: spi::SPI2::new(),
-            #[cfg(all(not(esp32c3), not(feature = "riscv-ulp-hal")))]
+            #[cfg(any(esp32, esp32s2, esp32s3))]
             spi3: spi::SPI3::new(),
             adc1: adc::ADC1::new(),
+            #[cfg(any(esp32, esp32s2, esp32s3, esp32c3))]
             adc2: adc::ADC2::new(),
+            #[cfg(any(esp32, esp32s2, esp32s3, esp32c6))]
+            pcnt0: pcnt::PCNT0::new(),
+            #[cfg(any(esp32, esp32s2, esp32s3, esp32c6))]
+            pcnt1: pcnt::PCNT1::new(),
+            #[cfg(any(esp32, esp32s2, esp32s3, esp32c6))]
+            pcnt2: pcnt::PCNT2::new(),
+            #[cfg(any(esp32, esp32s2, esp32s3, esp32c6))]
+            pcnt3: pcnt::PCNT3::new(),
+            #[cfg(esp32)]
+            pcnt4: pcnt::PCNT4::new(),
+            #[cfg(esp32)]
+            pcnt5: pcnt::PCNT5::new(),
+            #[cfg(esp32)]
+            pcnt6: pcnt::PCNT6::new(),
+            #[cfg(esp32)]
+            pcnt7: pcnt::PCNT7::new(),
             #[cfg(all(esp32, esp_idf_version_major = "4"))]
             hall_sensor: crate::hall::HallSensor::new(),
-            #[cfg(not(feature = "riscv-ulp-hal"))]
             can: can::CAN::new(),
-            #[cfg(not(feature = "riscv-ulp-hal"))]
             ledc: ledc::LEDC::new(),
             #[cfg(all(
                 any(esp32, esp32s3),
@@ -193,42 +211,40 @@ impl Peripherals {
             ))]
             mcpwm1: mcpwm::MCPWM::<mcpwm::Group1>::new(),
             #[cfg(not(feature = "riscv-ulp-hal"))]
+            #[cfg(esp32)]
+            hledc: ledc::HLEDC::new(),
             rmt: rmt::RMT::new(),
             #[cfg(all(
-                any(esp32, esp32s2, esp32s3),
-                not(feature = "riscv-ulp-hal"),
+                any(esp32, esp32s2, esp32s3, esp32c6, esp32p4),
                 esp_idf_comp_ulp_enabled
             ))]
             ulp: ulp::ULP::new(),
-            #[cfg(all(
-                any(all(esp32, esp_idf_eth_use_esp32_emac), esp_idf_eth_use_openeth),
-                not(feature = "riscv-ulp-hal")
-            ))]
+            #[cfg(any(all(esp32, esp_idf_eth_use_esp32_emac), esp_idf_eth_use_openeth))]
             mac: mac::MAC::new(),
-            #[cfg(not(feature = "riscv-ulp-hal"))]
             modem: modem::Modem::new(),
-            #[cfg(all(
-                not(feature = "riscv-ulp-hal"),
-                not(feature = "embassy-time-isr-queue-timer00")
-            ))]
+            #[cfg(all(esp_idf_soc_sdmmc_host_supported, feature = "experimental"))]
+            sdmmc0: sd::mmc::SDMMC0::new(),
+            #[cfg(all(esp_idf_soc_sdmmc_host_supported, feature = "experimental"))]
+            sdmmc1: sd::mmc::SDMMC1::new(),
+            #[cfg(all(esp_idf_soc_temp_sensor_supported, esp_idf_version_major = "5"))]
+            temp_sensor: temp_sensor::TempSensor::new(),
             timer00: timer::TIMER00::new(),
-            #[cfg(all(
-                not(esp32c3),
-                not(feature = "riscv-ulp-hal"),
-                not(feature = "embassy-time-isr-queue-timer01")
-            ))]
+            #[cfg(any(esp32, esp32s2, esp32s3))]
             timer01: timer::TIMER01::new(),
-            #[cfg(all(
-                not(feature = "riscv-ulp-hal"),
-                not(feature = "embassy-time-isr-queue-timer10")
-            ))]
+            #[cfg(not(esp32c2))]
             timer10: timer::TIMER10::new(),
-            #[cfg(all(
-                not(esp32c3),
-                not(feature = "riscv-ulp-hal"),
-                not(feature = "embassy-time-isr-queue-timer11")
-            ))]
+            #[cfg(any(esp32, esp32s2, esp32s3))]
             timer11: timer::TIMER11::new(),
+            #[cfg(any(
+                all(
+                    not(any(esp_idf_version_major = "4", esp_idf_version = "5.0")),
+                    esp_idf_esp_task_wdt_en
+                ),
+                any(esp_idf_version_major = "4", esp_idf_version = "5.0")
+            ))]
+            twdt: watchdog::TWDT::new(),
+            #[cfg(esp_idf_soc_usb_serial_jtag_supported)]
+            usb_serial: usb_serial::USB_SERIAL::new(),
         }
     }
 }
