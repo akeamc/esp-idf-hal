@@ -94,6 +94,8 @@ pub struct Peripherals {
         not(feature = "riscv-ulp-hal")
     ))]
     pub mcpwm1: mcpwm::MCPWM<mcpwm::Group1>,
+    #[cfg(esp32)]
+    pub hledc: ledc::HLEDC,
     #[cfg(not(feature = "riscv-ulp-hal"))]
     pub rmt: rmt::RMT,
     #[cfg(all(
@@ -210,7 +212,6 @@ impl Peripherals {
                 esp_idf_version_major = "5"
             ))]
             mcpwm1: mcpwm::MCPWM::<mcpwm::Group1>::new(),
-            #[cfg(not(feature = "riscv-ulp-hal"))]
             #[cfg(esp32)]
             hledc: ledc::HLEDC::new(),
             rmt: rmt::RMT::new(),

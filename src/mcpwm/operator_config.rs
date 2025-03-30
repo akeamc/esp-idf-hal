@@ -9,6 +9,9 @@ use super::{
 
 #[derive(Default)]
 pub struct OperatorConfig<'d> {
+    /// Interrupt priority for the operator
+    pub(crate) intr_priority: i32,
+
     /// Configuration for Comparator X
     pub(crate) comparator_x: ComparatorConfig,
 
@@ -47,6 +50,8 @@ impl<'d> OperatorConfig<'d> {
         flags.set_update_dead_time_on_sync(1);
 
         OperatorConfig {
+            intr_priority: 0,
+
             comparator_x: Default::default(), // SOC_MCPWM_COMPARATORS_PER_OPERATOR is 2 for ESP32 and ESP32-S3
             comparator_y: Default::default(),
 

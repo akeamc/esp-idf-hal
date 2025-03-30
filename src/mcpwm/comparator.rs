@@ -49,6 +49,7 @@ impl Comparator {
 
 #[derive(Debug, Clone, Copy)]
 pub struct ComparatorConfig {
+    intr_priority: i32,
     flags: mcpwm_comparator_config_t__bindgen_ty_1,
 }
 
@@ -57,7 +58,10 @@ impl ComparatorConfig {
         self,
         operator_handle: mcpwm_oper_handle_t,
     ) -> Result<Comparator, EspError> {
-        let cfg = mcpwm_comparator_config_t { flags: self.flags };
+        let cfg = mcpwm_comparator_config_t {
+            intr_priority: self.intr_priority,
+            flags: self.flags,
+        };
 
         let mut cmp = ptr::null_mut();
         unsafe {
@@ -75,6 +79,9 @@ impl Default for ComparatorConfig {
         flags.set_update_cmp_on_tep(0);
         flags.set_update_cmp_on_tez(1);
         flags.set_update_cmp_on_sync(0);
-        Self { flags }
+        Self {
+            intr_priority: 0,
+            flags,
+        }
     }
 }

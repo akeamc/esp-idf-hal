@@ -83,6 +83,7 @@ where
 
     let config = mcpwm_operator_config_t {
         group_id: G::ID,
+        intr_priority: cfg.intr_priority,
         flags,
     };
 

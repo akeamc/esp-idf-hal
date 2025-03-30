@@ -22,6 +22,7 @@ use super::timer_connection::TimerConnection;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TimerConfig {
+    intr_priority: i32,
     resolution: Hertz,
     period_ticks: u16,
     count_mode: CountMode,
@@ -34,6 +35,7 @@ pub struct TimerConfig {
 impl Default for TimerConfig {
     fn default() -> Self {
         Self {
+            intr_priority: 0,
             resolution: 80.MHz().into(),
             period_ticks: 8_000, // 10kHz
             count_mode: CountMode::Up,
@@ -47,6 +49,13 @@ impl TimerConfig {
         self.resolution = resolution.into();
         self
     }*/
+
+    /// Set the priority of the interrupt. A value of 0 means the default priority.
+    #[must_use]
+    pub fn intr_priority(mut self, intr_priority: i32) -> Self {
+        self.intr_priority = intr_priority;
+        self
+    }
 
     // TODO: make sure this description is accurate
     /// Set number of ticks per period
@@ -100,6 +109,7 @@ impl<const N: u8, G: Group> TimerDriver<N, G> {
 
         let cfg = mcpwm_timer_config_t {
             group_id: G::ID,
+            intr_priority: config.intr_priority,
             clk_src: soc_periph_mcpwm_timer_clk_src_t_MCPWM_TIMER_CLK_SRC_DEFAULT,
             resolution_hz: config.resolution.0,
             count_mode: config.count_mode.into(),
