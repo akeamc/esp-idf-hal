@@ -61,7 +61,7 @@ impl<'d> OperatorConfig<'d> {
     }
 }
 
-impl<'d> OperatorConfig<'d> {
+impl OperatorConfig<'_> {
     fn cmp_x(mut self, config: ComparatorConfig) -> Self {
         self.comparator_x = config;
         self

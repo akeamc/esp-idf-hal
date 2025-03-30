@@ -121,7 +121,7 @@ where
     })
 }
 
-impl<'d, const N: u8, G> Operator<'d, N, G>
+impl<const N: u8, G> Operator<'_, N, G>
 where
     G: Group,
 {
@@ -163,7 +163,7 @@ where
     }
 }
 
-impl<'d, const N: u8, G> Operator<'d, N, G>
+impl<const N: u8, G> Operator<'_, N, G>
 where
     G: Group,
 {
@@ -196,7 +196,7 @@ where
 }
 
 pub trait OptionalOperator<const N: u8, G: Group> {}
-impl<'d, const N: u8, G> OptionalOperator<N, G> for Operator<'d, N, G> where G: Group {}
+impl<const N: u8, G> OptionalOperator<N, G> for Operator<'_, N, G> where G: Group {}
 
 pub struct NoOperator;
 impl<const N: u8, G: Group> OptionalOperator<N, G> for NoOperator {}
